@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Camera, Activity, Heart, Zap, Volume2, VolumeX, Play, Pause, Settings } from 'lucide-react';
+import { Camera, Activity, Heart, Zap, Volume2, VolumeX, Play, Pause, Settings, AlertCircle, CheckCircle, Wifi, WifiOff } from 'lucide-react';
 
 // TypeScript Interfaces
 interface KeyPoint {
@@ -8,58 +8,45 @@ interface KeyPoint {
   confidence: number;
 }
 
-interface JointAngles {
-  right_elbow: number;
-  left_elbow: number;
-  right_knee: number;
-  left_knee: number;
-  right_hip?: number;
-  left_hip?: number;
-}
-
-interface SymmetryData {
-  shoulder_width: number;
-  arm_symmetry: number;
-  leg_symmetry: number;
-  hip_width?: number;
-}
-
-interface BalanceData {
-  cog: [number, number];
-  balance_score: number;
-}
-
-interface MovementData {
-  energy: string;
-  movement_score: number;
-  velocity: number;
-  sentiment?: string;
-}
-
-interface EmotionData {
-  emotion: string;
-  confidence: number;
-  sentiment: string;
-  details?: string;
-}
-
-interface PostureData {
-  status: string;
-  angle: number;
-  color?: [number, number, number];
-  shoulder_aligned?: boolean;
-}
-
-interface PoseFrameData {
+interface AnalysisData {
   frame_num: number;
   timestamp: number;
   keypoints: (KeyPoint | null)[];
-  joints: JointAngles;
-  symmetry: SymmetryData;
-  balance: BalanceData;
-  movement: MovementData;
-  emotion: EmotionData;
-  posture: PostureData;
+  joints: {
+    right_elbow?: number;
+    left_elbow?: number;
+    right_knee?: number;
+    left_knee?: number;
+    right_hip?: number;
+    left_hip?: number;
+  };
+  symmetry: {
+    shoulder_width?: number;
+    arm_symmetry?: number;
+    leg_symmetry?: number;
+    hip_width?: number;
+  };
+  balance: {
+    cog: [number, number];
+    balance_score: number;
+  };
+  movement: {
+    energy: string;
+    movement_score: number;
+    velocity: number;
+    sentiment?: string;
+  };
+  emotion: {
+    emotion: string;
+    confidence: number;
+    sentiment: string;
+    details?: string;
+  };
+  posture: {
+    status: string;
+    angle: number;
+    shoulder_aligned?: boolean;
+  };
   activities: string[];
 }
 
@@ -70,6 +57,7 @@ interface Stats {
   emotion: string;
   emotionConfidence: number;
   posture: string;
+  postureAngle: number;
 }
 
 interface FeedbackItem {
@@ -79,6 +67,8 @@ interface FeedbackItem {
 }
 
 type ConnectionStatus = 'disconnected' | 'connected' | 'error' | 'connecting';
+
+const POSE_PAIRS = [[0, 1], [1, 2], [2, 3], [3, 4], [1, 5], [5, 6], [6, 7], [1, 8], [8, 9], [9, 10], [1, 11], [11, 12], [12, 13], [0, 14], [0, 15], [14, 16], [15, 17]];
 
 const VideoCoachApp: React.FC = () => {
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
@@ -90,35 +80,59 @@ const VideoCoachApp: React.FC = () => {
     energy: 'Unknown',
     emotion: 'Unknown',
     emotionConfidence: 0,
-    posture: 'Unknown'
+    posture: 'Unknown',
+    postureAngle: 0
   });
   const [recentFeedback, setRecentFeedback] = useState<FeedbackItem[]>([]);
   const [showSettings, setShowSettings] = useState<boolean>(false);
   const [backendUrl, setBackendUrl] = useState<string>('ws://localhost:8000');
+  const [frameRate, setFrameRate] = useState<number>(10);
+  const [lastAnalysis, setLastAnalysis] = useState<AnalysisData | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const wsVideoRef = useRef<WebSocket | null>(null);
   const wsAudioRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const animationFrameRef = useRef<number | null>(null);
+  const frameIntervalRef = useRef<number | null>(null);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (wsVideoRef.current) wsVideoRef.current.close();
-      if (wsAudioRef.current) wsAudioRef.current.close();
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-      }
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-      if (audioContextRef.current) {
-        audioContextRef.current.close();
-      }
+      stopStreaming();
     };
+  }, []);
+
+  const drawSkeleton = useCallback((ctx: CanvasRenderingContext2D, keypoints: (KeyPoint | null)[]) => {
+    if (!keypoints || keypoints.length === 0) return;
+
+    // Draw skeleton lines
+    ctx.strokeStyle = '#00ff00';
+    ctx.lineWidth = 3;
+
+    POSE_PAIRS.forEach(([i, j]) => {
+      const ptA = keypoints[i];
+      const ptB = keypoints[j];
+
+      if (ptA && ptB) {
+        ctx.beginPath();
+        ctx.moveTo(ptA.x, ptA.y);
+        ctx.lineTo(ptB.x, ptB.y);
+        ctx.stroke();
+      }
+    });
+
+    // Draw keypoints
+    keypoints.forEach((point) => {
+      if (point && point.confidence > 0.3) {
+        ctx.fillStyle = '#ff0000';
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 5, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+    });
   }, []);
 
   const connectWebSockets = useCallback(() => {
@@ -135,7 +149,37 @@ const VideoCoachApp: React.FC = () => {
     wsVideoRef.current.onmessage = (event: MessageEvent) => {
       try {
         const response = JSON.parse(event.data);
-        console.log('📥 Backend response:', response);
+
+        // Handle acknowledgment
+        if (response.status === 'received') {
+          return;
+        }
+
+        // Handle analysis response (if backend processes frames)
+        if (response.keypoints) {
+          setLastAnalysis(response);
+
+          // Update stats
+          setStats({
+            frameCount: response.frame_num || stats.frameCount,
+            balance: response.balance?.balance_score || 0,
+            energy: response.movement?.energy || 'Unknown',
+            emotion: response.emotion?.emotion || 'Unknown',
+            emotionConfidence: response.emotion?.confidence || 0,
+            posture: response.posture?.status || 'Unknown',
+            postureAngle: response.posture?.angle || 0
+          });
+
+          // Draw skeleton on overlay
+          const overlayCanvas = overlayCanvasRef.current;
+          if (overlayCanvas && response.keypoints) {
+            const ctx = overlayCanvas.getContext('2d');
+            if (ctx) {
+              ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+              drawSkeleton(ctx, response.keypoints);
+            }
+          }
+        }
       } catch (err) {
         console.error('Failed to parse backend response:', err);
       }
@@ -168,7 +212,6 @@ const VideoCoachApp: React.FC = () => {
             source.connect(audioContextRef.current.destination);
             source.start(0);
 
-            // Add feedback to UI
             const timestamp = new Date().toLocaleTimeString();
             setRecentFeedback(prev => [{
               time: timestamp,
@@ -184,162 +227,142 @@ const VideoCoachApp: React.FC = () => {
         console.error('Audio WebSocket error:', error);
       };
     }
-  }, [backendUrl, isAudioEnabled]);
+  }, [backendUrl, isAudioEnabled, stats.frameCount, drawSkeleton]);
+
+  const captureAndSendFrame = useCallback(() => {
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+
+    if (!canvas || !video || !wsVideoRef.current || wsVideoRef.current.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Draw current video frame to canvas
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    // Convert to base64 JPEG
+    const frameData = canvas.toDataURL('image/jpeg', 0.8);
+    const base64Data = frameData.split(',')[1];
+
+    // Send to backend for processing
+    try {
+      wsVideoRef.current.send(JSON.stringify({
+        frame: base64Data,
+        timestamp: Date.now() / 1000
+      }));
+
+      setStats(prev => ({
+        ...prev,
+        frameCount: prev.frameCount + 1
+      }));
+    } catch (err) {
+      console.error('Error sending frame:', err);
+    }
+  }, []);
 
   const startStreaming = async (): Promise<void> => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 640, height: 480 }
+        video: {
+          width: 640,
+          height: 480,
+          facingMode: 'user'
+        }
       });
 
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        await videoRef.current.play();
       }
 
       connectWebSockets();
       setIsStreaming(true);
 
-      // Start frame processing
-      processFrames();
+      // Start frame capture at specified frame rate
+      const interval = 1000 / frameRate;
+      frameIntervalRef.current = setInterval(captureAndSendFrame, interval);
     } catch (err) {
       console.error('Camera access error:', err);
-      alert('Could not access camera. Please grant permission.');
+      alert('Could not access camera. Please grant permission and ensure camera is not in use.');
     }
   };
 
   const stopStreaming = (): void => {
+    if (frameIntervalRef.current) {
+      clearInterval(frameIntervalRef.current);
+      frameIntervalRef.current = null;
+    }
+
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
     }
-    if (wsVideoRef.current) wsVideoRef.current.close();
-    if (wsAudioRef.current) wsAudioRef.current.close();
-    if (animationFrameRef.current) {
-      cancelAnimationFrame(animationFrameRef.current);
+
+    if (wsVideoRef.current) {
+      wsVideoRef.current.close();
+      wsVideoRef.current = null;
+    }
+
+    if (wsAudioRef.current) {
+      wsAudioRef.current.close();
+      wsAudioRef.current = null;
+    }
+
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
     }
 
     setIsStreaming(false);
     setConnectionStatus('disconnected');
-  };
+    setLastAnalysis(null);
 
-  const generateMockPoseData = useCallback((): PoseFrameData => {
-    const emotions: string[] = ['Happy', 'Neutral', 'Focused', 'Tired'];
-    const energyLevels: string[] = ['Low (Calm)', 'Medium (Active)', 'High (Moving)'];
-    const postureStates: string[] = ['Excellent', 'Good', 'Fair', 'Poor'];
-
-    return {
-      frame_num: stats.frameCount + 1,
-      timestamp: Date.now() / 1000,
-      keypoints: Array(18).fill(null).map((_) =>
-        Math.random() > 0.3 ? {
-          x: Math.random() * 640,
-          y: Math.random() * 480,
-          confidence: Math.random()
-        } : null
-      ),
-      joints: {
-        right_elbow: 120 + Math.random() * 60,
-        left_elbow: 120 + Math.random() * 60,
-        right_knee: 140 + Math.random() * 40,
-        left_knee: 140 + Math.random() * 40
-      },
-      symmetry: {
-        shoulder_width: 300 + Math.random() * 50,
-        arm_symmetry: Math.random() * 15,
-        leg_symmetry: Math.random() * 15
-      },
-      balance: {
-        cog: [320, 240],
-        balance_score: 40 + Math.random() * 50
-      },
-      movement: {
-        energy: energyLevels[Math.floor(Math.random() * energyLevels.length)],
-        movement_score: Math.random() * 30,
-        velocity: Math.random() * 40
-      },
-      emotion: {
-        emotion: emotions[Math.floor(Math.random() * emotions.length)],
-        confidence: 60 + Math.random() * 30,
-        sentiment: 'Positive'
-      },
-      posture: {
-        status: postureStates[Math.floor(Math.random() * postureStates.length)],
-        angle: Math.random() * 50
-      },
-      activities: ['Normal Pose']
-    };
-  }, [stats.frameCount]);
-
-  const processFrames = useCallback((): void => {
-    const canvas = canvasRef.current;
-    const video = videoRef.current;
-
-    if (!canvas || !video) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const processFrame = (): void => {
-      if (!isStreaming) return;
-
-      // Draw video frame to canvas
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-      // Generate mock pose data (replace with actual OpenPose integration)
-      const mockData = generateMockPoseData();
-
-      // Update UI stats
-      setStats(prev => ({
-        frameCount: prev.frameCount + 1,
-        balance: mockData.balance.balance_score,
-        energy: mockData.movement.energy,
-        emotion: mockData.emotion.emotion,
-        emotionConfidence: mockData.emotion.confidence,
-        posture: mockData.posture.status
-      }));
-
-      // Send to backend
-      if (wsVideoRef.current?.readyState === WebSocket.OPEN) {
-        wsVideoRef.current.send(JSON.stringify(mockData));
+    // Clear overlay
+    const overlayCanvas = overlayCanvasRef.current;
+    if (overlayCanvas) {
+      const ctx = overlayCanvas.getContext('2d');
+      if (ctx) {
+        ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
       }
-
-      // Continue processing
-      animationFrameRef.current = requestAnimationFrame(processFrame);
-    };
-
-    processFrame();
-  }, [isStreaming, generateMockPoseData]);
-
-  useEffect(() => {
-    if (isStreaming) {
-      processFrames();
     }
-  }, [isStreaming, processFrames]);
+  };
 
-  const getPostureColorClass = (posture: string): string => {
+  const getPostureColor = (posture: string): string => {
     switch (posture) {
-      case 'Excellent': return 'bg-green-500/20 border border-green-500/30';
-      case 'Good': return 'bg-blue-500/20 border border-blue-500/30';
-      case 'Fair': return 'bg-yellow-500/20 border border-yellow-500/30';
-      default: return 'bg-red-500/20 border border-red-500/30';
+      case 'Excellent': return 'text-green-400';
+      case 'Good': return 'text-blue-400';
+      case 'Fair': return 'text-yellow-400';
+      default: return 'text-red-400';
     }
   };
 
-  const getConnectionStatusColor = (status: ConnectionStatus): string => {
-    switch (status) {
-      case 'connected': return 'bg-green-500/20 text-green-300';
-      case 'error': return 'bg-red-500/20 text-red-300';
-      case 'connecting': return 'bg-yellow-500/20 text-yellow-300';
-      default: return 'bg-gray-500/20 text-gray-300';
+  const getPostureBgClass = (posture: string): string => {
+    switch (posture) {
+      case 'Excellent': return 'bg-green-500/20 border-green-500/30';
+      case 'Good': return 'bg-blue-500/20 border-blue-500/30';
+      case 'Fair': return 'bg-yellow-500/20 border-yellow-500/30';
+      default: return 'bg-red-500/20 border-red-500/30';
     }
   };
 
-  const getConnectionDotColor = (status: ConnectionStatus): string => {
+  const getConnectionIcon = (status: ConnectionStatus) => {
+    return status === 'connected' ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />;
+  };
+
+  const getConnectionColor = (status: ConnectionStatus): string => {
     switch (status) {
-      case 'connected': return 'bg-green-400 animate-pulse';
-      case 'error': return 'bg-red-400';
-      case 'connecting': return 'bg-yellow-400 animate-pulse';
-      default: return 'bg-gray-400';
+      case 'connected': return 'text-green-400';
+      case 'error': return 'text-red-400';
+      case 'connecting': return 'text-yellow-400';
+      default: return 'text-gray-400';
     }
   };
 
@@ -359,8 +382,8 @@ const VideoCoachApp: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-4">
-            <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm ${getConnectionStatusColor(connectionStatus)}`}>
-              <div className={`w-2 h-2 rounded-full ${getConnectionDotColor(connectionStatus)}`} />
+            <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm ${getConnectionColor(connectionStatus)}`}>
+              {getConnectionIcon(connectionStatus)}
               {connectionStatus}
             </div>
 
@@ -386,17 +409,23 @@ const VideoCoachApp: React.FC = () => {
                   autoPlay
                   playsInline
                   muted
-                  className="w-full h-full object-cover"
+                  className="absolute inset-0 w-full h-full object-cover"
                 />
                 <canvas
                   ref={canvasRef}
                   width={640}
                   height={480}
-                  className="absolute inset-0 w-full h-full opacity-0"
+                  className="hidden"
+                />
+                <canvas
+                  ref={overlayCanvasRef}
+                  width={640}
+                  height={480}
+                  className="absolute inset-0 w-full h-full pointer-events-none"
                 />
 
                 {!isStreaming && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-black/60">
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm">
                     <div className="text-center">
                       <Camera className="w-16 h-16 mx-auto mb-4 text-purple-400" />
                       <p className="text-lg mb-2">Camera Ready</p>
@@ -407,24 +436,30 @@ const VideoCoachApp: React.FC = () => {
 
                 {/* Live Stats Overlay */}
                 {isStreaming && (
-                  <div className="absolute top-4 left-4 space-y-2">
-                    <div className="bg-black/70 backdrop-blur-sm px-3 py-2 rounded-lg">
-                      <div className="text-xs text-purple-300">Balance</div>
-                      <div className="text-lg font-bold">{stats.balance.toFixed(0)}/100</div>
+                  <>
+                    <div className="absolute top-4 left-4 space-y-2">
+                      <div className="bg-black/70 backdrop-blur-sm px-3 py-2 rounded-lg">
+                        <div className="text-xs text-purple-300">Balance</div>
+                        <div className="text-lg font-bold">{stats.balance.toFixed(0)}/100</div>
+                      </div>
+                      <div className="bg-black/70 backdrop-blur-sm px-3 py-2 rounded-lg">
+                        <div className="text-xs text-purple-300">Emotion</div>
+                        <div className="text-sm font-bold">{stats.emotion}</div>
+                        <div className="text-xs text-gray-400">{stats.emotionConfidence.toFixed(0)}%</div>
+                      </div>
+                      <div className="bg-black/70 backdrop-blur-sm px-3 py-2 rounded-lg">
+                        <div className="text-xs text-purple-300">Posture</div>
+                        <div className={`text-sm font-bold ${getPostureColor(stats.posture)}`}>
+                          {stats.posture}
+                        </div>
+                      </div>
                     </div>
-                    <div className="bg-black/70 backdrop-blur-sm px-3 py-2 rounded-lg">
-                      <div className="text-xs text-purple-300">Emotion</div>
-                      <div className="text-sm font-bold">{stats.emotion}</div>
-                    </div>
-                  </div>
-                )}
 
-                {/* Frame Counter */}
-                {isStreaming && (
-                  <div className="absolute top-4 right-4 bg-black/70 backdrop-blur-sm px-3 py-2 rounded-lg">
-                    <div className="text-xs text-purple-300">Frame</div>
-                    <div className="text-lg font-bold">{stats.frameCount}</div>
-                  </div>
+                    <div className="absolute top-4 right-4 bg-black/70 backdrop-blur-sm px-3 py-2 rounded-lg">
+                      <div className="text-xs text-purple-300">Frame</div>
+                      <div className="text-lg font-bold">{stats.frameCount}</div>
+                    </div>
+                  </>
                 )}
               </div>
 
@@ -463,6 +498,31 @@ const VideoCoachApp: React.FC = () => {
                 </div>
               </div>
             </div>
+
+            {/* Analysis Details */}
+            {lastAnalysis && (
+              <div className="bg-black/40 backdrop-blur-sm rounded-2xl border border-purple-500/20 p-6">
+                <h3 className="text-lg font-bold mb-4">Current Analysis</h3>
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <span className="text-gray-400">Posture Angle:</span>
+                    <span className="ml-2 font-semibold">{stats.postureAngle.toFixed(1)}°</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400">Movement Score:</span>
+                    <span className="ml-2 font-semibold">{lastAnalysis.movement.movement_score.toFixed(2)}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400">Velocity:</span>
+                    <span className="ml-2 font-semibold">{lastAnalysis.movement.velocity.toFixed(2)} px/f</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400">Arm Symmetry:</span>
+                    <span className="ml-2 font-semibold">{lastAnalysis.symmetry.arm_symmetry?.toFixed(1) || 'N/A'}%</span>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Stats Panel */}
@@ -490,7 +550,7 @@ const VideoCoachApp: React.FC = () => {
 
                 <div>
                   <div className="flex justify-between text-sm mb-1">
-                    <span className="text-gray-400">Energy</span>
+                    <span className="text-gray-400">Energy Level</span>
                     <span className="font-semibold">{stats.energy}</span>
                   </div>
                   <div className="px-3 py-2 bg-blue-500/20 border border-blue-500/30 rounded-lg text-sm">
@@ -503,7 +563,7 @@ const VideoCoachApp: React.FC = () => {
                     <span className="text-gray-400">Posture</span>
                     <span className="font-semibold">{stats.posture}</span>
                   </div>
-                  <div className={`px-3 py-2 rounded-lg text-sm ${getPostureColorClass(stats.posture)}`}>
+                  <div className={`px-3 py-2 border rounded-lg text-sm ${getPostureBgClass(stats.posture)}`}>
                     {stats.posture}
                   </div>
                 </div>
@@ -523,12 +583,13 @@ const VideoCoachApp: React.FC = () => {
 
             {/* Recent Feedback */}
             <div className="bg-black/40 backdrop-blur-sm rounded-2xl border border-purple-500/20 p-6">
-              <h2 className="text-lg font-bold mb-4">Recent Feedback</h2>
+              <h2 className="text-lg font-bold mb-4">Coach Feedback</h2>
 
               {recentFeedback.length === 0 ? (
                 <div className="text-center py-8 text-gray-400">
                   <Volume2 className="w-8 h-8 mx-auto mb-2 opacity-50" />
                   <p className="text-sm">No feedback yet</p>
+                  <p className="text-xs mt-1">Start exercising to receive coaching</p>
                 </div>
               ) : (
                 <div className="space-y-3">
@@ -539,20 +600,24 @@ const VideoCoachApp: React.FC = () => {
                     >
                       <div className="text-xs text-purple-300 mb-1">{feedback.time}</div>
                       <div className="text-sm">{feedback.text}</div>
+                      {feedback.reason && (
+                        <div className="text-xs text-gray-400 mt-1">Reason: {feedback.reason}</div>
+                      )}
                     </div>
                   ))}
                 </div>
               )}
             </div>
 
-            {/* Connection Info */}
+            {/* System Status */}
             <div className="bg-black/40 backdrop-blur-sm rounded-2xl border border-purple-500/20 p-6">
               <h2 className="text-lg font-bold mb-4">System Status</h2>
               <div className="space-y-2 text-sm">
-                <div className="flex justify-between">
+                <div className="flex justify-between items-center">
                   <span className="text-gray-400">Backend</span>
-                  <span className={connectionStatus === 'connected' ? 'text-green-400' : 'text-red-400'}>
-                    {connectionStatus === 'connected' ? '✓ Connected' : '✗ Disconnected'}
+                  <span className={connectionStatus === 'connected' ? 'text-green-400 flex items-center gap-1' : 'text-red-400 flex items-center gap-1'}>
+                    {connectionStatus === 'connected' ? <CheckCircle className="w-4 h-4" /> : <AlertCircle className="w-4 h-4" />}
+                    {connectionStatus === 'connected' ? 'Connected' : 'Disconnected'}
                   </span>
                 </div>
                 <div className="flex justify-between">
@@ -562,8 +627,12 @@ const VideoCoachApp: React.FC = () => {
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-gray-400">Frames</span>
+                  <span className="text-gray-400">Frames Processed</span>
                   <span className="text-white">{stats.frameCount}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Frame Rate</span>
+                  <span className="text-white">{frameRate} fps</span>
                 </div>
               </div>
             </div>
@@ -587,21 +656,26 @@ const VideoCoachApp: React.FC = () => {
                   type="text"
                   value={backendUrl}
                   onChange={(e) => setBackendUrl(e.target.value)}
-                  className="w-full px-4 py-2 bg-black/40 border border-purple-500/20 rounded-lg focus:outline-none focus:border-purple-500"
+                  className="w-full px-4 py-2 bg-black/40 border border-purple-500/20 rounded-lg focus:outline-none focus:border-purple-500 text-white"
+                  placeholder="ws://localhost:8000"
                 />
+                <p className="text-xs text-gray-500 mt-1">WebSocket URL (without /ws/...)</p>
               </div>
 
               <div>
-                <label htmlFor="camera-resolution" className="block text-sm text-gray-400 mb-2">
-                  Camera Resolution
+                <label htmlFor="frame-rate" className="block text-sm text-gray-400 mb-2">
+                  Frame Rate (fps)
                 </label>
                 <select
-                  id="camera-resolution"
-                  className="w-full px-4 py-2 bg-black/40 border border-purple-500/20 rounded-lg focus:outline-none focus:border-purple-500"
+                  id="frame-rate"
+                  value={frameRate}
+                  onChange={(e) => setFrameRate(Number(e.target.value))}
+                  className="w-full px-4 py-2 bg-black/40 border border-purple-500/20 rounded-lg focus:outline-none focus:border-purple-500 text-white"
                 >
-                  <option>640x480</option>
-                  <option>1280x720</option>
-                  <option>1920x1080</option>
+                  <option value={5}>5 fps (Low CPU)</option>
+                  <option value={10}>10 fps (Balanced)</option>
+                  <option value={15}>15 fps (Smooth)</option>
+                  <option value={30}>30 fps (High Quality)</option>
                 </select>
               </div>
 
@@ -614,9 +688,20 @@ const VideoCoachApp: React.FC = () => {
                   type="button"
                   aria-label="Toggle audio feedback"
                 >
-                  <div className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${isAudioEnabled ? 'translate-x-6' : 'translate-x-0'
-                    }`} />
+                  <div
+                    className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${isAudioEnabled ? 'translate-x-6' : 'translate-x-0'
+                      }`}
+                  />
                 </button>
+              </div>
+
+              <div className="pt-4 border-t border-purple-500/20">
+                <h3 className="text-sm font-semibold mb-2">Connection Info</h3>
+                <div className="text-xs text-gray-400 space-y-1">
+                  <p>• Video: {backendUrl}/ws/video-analysis</p>
+                  <p>• Audio: {backendUrl}/ws/coach-audio</p>
+                  <p>• Status: {connectionStatus}</p>
+                </div>
               </div>
             </div>
 
@@ -625,7 +710,7 @@ const VideoCoachApp: React.FC = () => {
               className="w-full mt-6 px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg transition"
               type="button"
             >
-              Close
+              Close Settings
             </button>
           </div>
         </div>
