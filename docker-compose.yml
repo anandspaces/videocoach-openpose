@@ -1,0 +1,36 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: video-coach-backend
+    ports:
+      - "9005:9005"
+    env_file:
+      - ./backend/.env
+    volumes:
+      # Mount logs directory for persistence
+      - ./backend/logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - video-coach-network
+
+  # Production frontend with serve
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: video-coach-frontend
+    ports:
+      - "4005:4005"
+    env_file:
+      - ./frontend/.env
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - video-coach-network
+
+networks:
+  video-coach-network:
+    driver: bridge
