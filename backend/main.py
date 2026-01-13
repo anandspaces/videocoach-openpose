@@ -1,7 +1,8 @@
 """
-Headless AI Video Coach System - WITH MEETING SUPPORT
-Server-side backend for React frontend - No GUI
-Includes video meeting session creation and management
+Headless AI Video Coach System - OpenPose Integration
+Server-side backend for React frontend
+Integrates with OpenPose motion analysis data
+FIXED: Enhanced logging for debugging
 """
 
 import cv2
@@ -17,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional
 import uvicorn
+from concurrent.futures import ThreadPoolExecutor
 
 # Pose detection imports
 from pose_detector import PoseDetector
@@ -27,14 +29,13 @@ from body_science import BodyScience
 from services.coach_engine import CoachEngine
 from services.state_manager import SessionManager
 from websocket.gemini_ws import GeminiClient
-from websocket.tts_ws import TTSClient
 
 # Meeting management
 from services.meet_session import VideoMeetManager
 
-# Configure logging
+# Configure logging with more detail
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Changed to DEBUG for more visibility
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -43,9 +44,9 @@ logger = logging.getLogger(__name__)
 session_manager = SessionManager()
 video_meet_manager = None
 gemini_client = None
-tts_client = None
 pose_detector = None
 posture_analyzer = None
+executor = ThreadPoolExecutor(max_workers=4)
 
 
 def convert_to_serializable(obj):
@@ -65,83 +66,132 @@ def convert_to_serializable(obj):
     return obj
 
 
-def decode_base64_frame(base64_str: str) -> np.ndarray:
+def decode_base64_frame(base64_str: str) -> Optional[np.ndarray]:
     """Decode base64 image string to OpenCV frame"""
     try:
+        if ',' in base64_str:
+            base64_str = base64_str.split(',')[1]
+        
         img_data = base64.b64decode(base64_str)
         nparr = np.frombuffer(img_data, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if frame is None:
+            logger.error("❌ Failed to decode frame: cv2.imdecode returned None")
+        else:
+            logger.debug(f"✅ Frame decoded successfully: {frame.shape}")
+            
         return frame
     except Exception as e:
-        logger.error(f"Failed to decode frame: {e}")
+        logger.error(f"❌ Failed to decode frame: {e}", exc_info=True)
         return None
 
 
-def process_frame(frame: np.ndarray, frame_count: int) -> Dict[str, Any]:
-    """Process a single frame and return analysis data"""
-    # Detect pose
-    points, _ = pose_detector.detect(frame)
+def _process_frame_sync(frame: np.ndarray, frame_count: int) -> Dict[str, Any]:
+    """
+    Synchronous frame processing using OpenPose
+    """
+    try:
+        logger.debug(f"🔄 Processing frame {frame_count}...")
+        
+        # Detect pose
+        points, points_prob = pose_detector.detect(frame)
+        valid_keypoints = sum(1 for p in points if p is not None)
+        logger.debug(f"👤 Detected {valid_keypoints} keypoints")
+        
+        # Analyze posture (may return None if insufficient keypoints)
+        posture = posture_analyzer.analyze_posture(points)
+        movement = posture_analyzer.analyze_movement(points)
+        activities = posture_analyzer.detect_activity(points)
+        emotion = posture_analyzer.analyze_facial_sentiment(frame, points)
+        
+        # Log analysis results with None checks
+        posture_status = posture.get('status', 'Unknown') if posture else 'Insufficient Data'
+        movement_energy = movement.get('energy', 'Unknown') if movement else 'Insufficient Data'
+        logger.debug(f"📊 Posture: {posture_status}, Movement: {movement_energy}")
+        
+        # Body Science calculations (may also return None)
+        joints = BodyScience.analyze_joints(points)
+        symmetry = BodyScience.analyze_symmetry(points)
+        cog_data = BodyScience.analyze_center_of_gravity(points)
+        
+        # Prepare analysis data with safe defaults for None values
+        frame_data = {
+            "frame_num": int(frame_count),
+            "timestamp": float(cv2.getTickCount() / cv2.getTickFrequency()),
+            "keypoints": [
+                {
+                    "x": float(p[0]), 
+                    "y": float(p[1]), 
+                    "confidence": float(p[2])
+                } if p is not None else None 
+                for p in points
+            ],
+            "joints": {k: float(v) for k, v in joints.items()} if joints else {},
+            "symmetry": {k: float(v) for k, v in symmetry.items()} if symmetry else {},
+            "balance": {
+                "cog": [float(cog_data['cog'][0]), float(cog_data['cog'][1])],
+                "balance_score": float(cog_data['balance_score'])
+            } if cog_data else {"cog": [0, 0], "balance_score": 0},
+            "posture": {
+                "status": posture['status'],
+                "angle": float(posture['angle']),
+                "shoulder_aligned": bool(posture['shoulder_aligned']) if posture.get('shoulder_aligned') is not None else None
+            } if posture else {"status": "Unknown", "angle": 0, "shoulder_aligned": None},
+            "movement": {
+                "energy": movement['energy'],
+                "sentiment": movement.get('sentiment', 'Unknown'),
+                "movement_score": float(movement['movement_score']),
+                "velocity": float(movement['velocity'])
+            } if movement else {"energy": "Unknown", "sentiment": "Unknown", "movement_score": 0, "velocity": 0},
+            "emotion": {
+                "emotion": emotion['emotion'],
+                "sentiment": emotion['sentiment'],
+                "confidence": int(emotion['confidence']),
+                "details": emotion.get('details', ''),
+                "all_emotions": {k: float(v) for k, v in emotion.get('all_emotions', {}).items()}
+            } if emotion else {"emotion": "Unknown", "sentiment": "Unknown", "confidence": 0, "details": "", "all_emotions": {}},
+            "activities": activities if activities else []
+        }
+        
+        logger.debug(f"✅ Frame {frame_count} processed successfully")
+        return frame_data
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing frame {frame_count}: {e}", exc_info=True)
+        return None
+
+
+async def process_frame(frame: np.ndarray, frame_count: int) -> Optional[Dict[str, Any]]:
+    """
+    Process a single frame asynchronously
+    """
+    loop = asyncio.get_event_loop()
     
-    # Analyze posture
-    posture = posture_analyzer.analyze_posture(points)
-    movement = posture_analyzer.analyze_movement(points)
-    activities = posture_analyzer.detect_activity(points)
-    emotion = posture_analyzer.analyze_facial_sentiment(frame, points)
-    
-    # Body Science calculations
-    joints = BodyScience.analyze_joints(points)
-    symmetry = BodyScience.analyze_symmetry(points)
-    cog_data = BodyScience.analyze_center_of_gravity(points)
-    
-    # Prepare analysis data
-    frame_data = {
-        "frame_num": int(frame_count),
-        "timestamp": float(cv2.getTickCount() / cv2.getTickFrequency()),
-        "keypoints": [
-            {"x": float(p[0]), "y": float(p[1]), "confidence": float(p[2])} if p is not None else None 
-            for p in points
-        ],
-        "joints": {k: float(v) for k, v in joints.items()},
-        "symmetry": {k: float(v) for k, v in symmetry.items()},
-        "balance": {
-            "cog": [float(cog_data['cog'][0]), float(cog_data['cog'][1])],
-            "balance_score": float(cog_data['balance_score'])
-        } if cog_data else {},
-        "posture": {
-            "status": posture['status'],
-            "angle": float(posture['angle']),
-            "shoulder_aligned": bool(posture['shoulder_aligned']) if posture['shoulder_aligned'] is not None else None
-        } if posture else {},
-        "movement": {
-            "energy": movement['energy'],
-            "sentiment": movement['sentiment'],
-            "movement_score": float(movement['movement_score']),
-            "velocity": float(movement['velocity'])
-        },
-        "emotion": {
-            "emotion": emotion['emotion'],
-            "sentiment": emotion['sentiment'],
-            "confidence": int(emotion['confidence']),
-            "details": emotion['details'],
-            "all_emotions": {k: float(v) for k, v in emotion.get('all_emotions', {}).items()}
-        },
-        "activities": activities
-    }
-    
-    return frame_data
+    try:
+        frame_data = await loop.run_in_executor(
+            executor,
+            _process_frame_sync,
+            frame,
+            frame_count
+        )
+        return frame_data
+    except Exception as e:
+        logger.error(f"❌ Error in async frame processing: {e}", exc_info=True)
+        return None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
-    global gemini_client, tts_client, pose_detector, posture_analyzer, video_meet_manager
+    global gemini_client, pose_detector, posture_analyzer, video_meet_manager
     
     logger.info("=" * 60)
-    logger.info("🚀 Starting AI Video Coach Backend with Meeting Support")
+    logger.info("🚀 Starting AI Video Coach Backend with OpenPose")
     logger.info("=" * 60)
     
     # Initialize pose detector
-    logger.info("🎥 Initializing pose detector...")
+    logger.info("🎥 Initializing OpenPose detector...")
     model_file = "openpose/models/pose/coco/pose_iter_440000.caffemodel"
     config_file = "openpose/models/pose/coco/pose_deploy_linevec.prototxt"
     
@@ -153,37 +203,29 @@ async def lifespan(app: FastAPI):
     posture_analyzer = PostureAnalyzer()
     
     # Initialize Gemini client
+    logger.info("🤖 Initializing Gemini AI...")
     gemini_client = GeminiClient()
     await gemini_client.connect()
-    
-    # Initialize TTS client
-    tts_client = TTSClient()
-    await tts_client.connect()
     
     # Initialize video meet manager
     video_meet_manager = VideoMeetManager(base_url="http://localhost:8000")
     
     logger.info("✅ All services initialized")
-    logger.info("📡 Backend running with meeting support")
-    logger.info("🌐 Available endpoints:")
-    logger.info("   → Create Meeting: POST /api/create-meeting")
-    logger.info("   → Join Meeting: GET /meet/{session_id}")
-    logger.info("   → Video Analysis: ws://localhost:8000/ws/video-analysis")
-    logger.info("   → Meeting Stream: ws://localhost:8000/ws/meet/{session_id}")
+    logger.info("📡 Backend running on http://localhost:8000")
     
     yield
     
     # Cleanup
     logger.info("🔄 Shutting down services...")
+    executor.shutdown(wait=True)
     await gemini_client.disconnect()
-    await tts_client.disconnect()
     logger.info("👋 Shutdown complete")
 
 
 app = FastAPI(
-    title="AI Video Coach Backend with Meeting Support",
-    description="Creates video meetings with AI coaching integration",
-    version="2.1.0-meetings",
+    title="AI Video Coach Backend",
+    description="Backend with OpenPose analysis and AI coaching",
+    version="2.2.0",
     lifespan=lifespan
 )
 
@@ -202,16 +244,10 @@ async def root():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "mode": "headless_backend_with_meetings",
-        "service": "AI Video Coach Backend",
-        "version": "2.1.0",
-        "description": "Create AI coaching video meetings",
+        "service": "AI Video Coach Backend with OpenPose",
+        "version": "2.2.0",
         "endpoints": {
             "create_meeting": "POST /api/create-meeting",
-            "get_meeting": "GET /api/meeting/{session_id}",
-            "join_meeting": "GET /meet/{session_id}",
-            "list_meetings": "GET /api/meetings",
-            "end_meeting": "POST /api/end-meeting/{session_id}",
             "video_analysis": "ws://localhost:8000/ws/video-analysis",
             "meeting_stream": "ws://localhost:8000/ws/meet/{session_id}",
             "health": "/health",
@@ -222,58 +258,24 @@ async def root():
 
 @app.post("/api/create-meeting")
 async def create_meeting(host_id: Optional[str] = None):
-    """
-    Create a new AI video coach meeting session
-    
-    Args:
-        host_id: Optional host identifier
-        
-    Returns:
-        Meeting details with shareable link
-    
-    Example response:
-    {
-        "success": true,
-        "session_id": "abc123-def456-...",
-        "meeting_link": "http://localhost:8000/meet/abc123-def456-...",
-        "ws_endpoint": "ws://localhost:8000/ws/meet/abc123-def456-...",
-        "share_message": "Join AI Video Coach Session: ..."
-    }
-    """
+    """Create a new AI video coach meeting session"""
     try:
-        # Cleanup expired sessions first
         video_meet_manager.cleanup_expired()
-        
-        # Create new session
         session_data = video_meet_manager.create_session(host_id)
-        
         logger.info(f"📹 Meeting created: {session_data['meeting_link']}")
-        
         return session_data
-        
     except Exception as e:
-        logger.error(f"❌ Error creating meeting: {e}")
+        logger.error(f"Error creating meeting: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/meeting/{session_id}")
 async def get_meeting_info(session_id: str):
-    """
-    Get information about a meeting session
-    
-    Args:
-        session_id: Meeting session ID
-        
-    Returns:
-        Session details
-    """
+    """Get meeting information"""
     session = video_meet_manager.get_session(session_id)
     
     if not session:
-        raise HTTPException(
-            status_code=404, 
-            detail="Meeting not found or expired"
-        )
+        raise HTTPException(status_code=404, detail="Meeting not found or expired")
     
     return {
         "success": True,
@@ -284,140 +286,30 @@ async def get_meeting_info(session_id: str):
 
 @app.get("/meet/{session_id}")
 async def join_meeting(session_id: str):
-    """
-    Meeting join page endpoint
-    Frontend can use this to verify meeting exists
-    
-    Args:
-        session_id: Meeting session ID
-    """
+    """Meeting join endpoint"""
     session = video_meet_manager.get_session(session_id)
     
     if not session:
-        raise HTTPException(
-            status_code=404,
-            detail="Meeting not found or has expired"
-        )
+        raise HTTPException(status_code=404, detail="Meeting not found or expired")
     
     return {
         "success": True,
         "message": "Meeting is ready",
         "session_id": session_id,
-        "ws_endpoint": f"ws://localhost:8000/ws/meet/{session_id}",
-        "redirect_to_frontend": f"http://localhost:3000/meet/{session_id}"
+        "ws_endpoint": f"ws://localhost:8000/ws/meet/{session_id}"
     }
-
-
-@app.websocket("/ws/meet/{session_id}")
-async def meet_websocket_endpoint(websocket: WebSocket, session_id: str):
-    """
-    WebSocket endpoint for meeting sessions
-    Combines video analysis with real-time AI coaching
-    """
-    # Verify session exists
-    session = video_meet_manager.get_session(session_id)
-    
-    if not session:
-        await websocket.close(code=1008, reason="Meeting not found or expired")
-        return
-    
-    await websocket.accept()
-    
-    # Generate participant ID
-    participant_id = f"participant_{uuid.uuid4().hex[:8]}"
-    
-    # Add to session
-    video_meet_manager.add_participant(session_id, participant_id)
-    
-    logger.info(f"👤 Participant {participant_id} joined meeting {session_id}")
-    
-    # Create coaching session for this participant
-    coaching_session = session_manager.create_session(id(websocket))
-    coach = CoachEngine(coaching_session, gemini_client, tts_client)
-    
-    frame_count = 0
-    
-    try:
-        # Send welcome message
-        await websocket.send_json({
-            "type": "welcome",
-            "message": "Connected to AI Video Coach",
-            "session_id": session_id,
-            "participant_id": participant_id
-        })
-        
-        while True:
-            # Receive frame from frontend
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            
-            msg_type = message.get("type", "frame")
-            
-            if msg_type == "frame":
-                # Process video frame
-                frame_base64 = message.get("frame")
-                if not frame_base64:
-                    continue
-                
-                frame_count += 1
-                
-                # Decode and process frame
-                frame = decode_base64_frame(frame_base64)
-                if frame is None:
-                    continue
-                
-                frame_data = process_frame(frame, frame_count)
-                
-                # Update session
-                coaching_session.add_frame(frame_data)
-                coaching_session.update_metrics(frame_data)
-                
-                # Check for coaching feedback
-                if frame_count % 3 == 0:
-                    should_coach, reason = await coach.should_provide_feedback(frame_data)
-                    
-                    if should_coach:
-                        await coach.provide_feedback(frame_data, reason)
-                        frame_data["coaching"] = {
-                            "triggered": True,
-                            "reason": reason
-                        }
-                
-                # Send analysis back
-                await websocket.send_json({
-                    "type": "analysis",
-                    "data": convert_to_serializable(frame_data)
-                })
-            
-            elif msg_type == "ping":
-                await websocket.send_json({"type": "pong"})
-            
-            elif msg_type == "end":
-                break
-                
-    except WebSocketDisconnect:
-        logger.info(f"👋 Participant {participant_id} left meeting {session_id}")
-    except Exception as e:
-        logger.error(f"❌ Error in meeting {session_id}: {e}")
-    finally:
-        video_meet_manager.remove_participant(session_id, participant_id)
-        session_manager.remove_session(id(websocket))
 
 
 @app.post("/api/end-meeting/{session_id}")
 async def end_meeting(session_id: str):
-    """End a meeting session"""
+    """End a meeting"""
     session = video_meet_manager.get_session(session_id)
     
     if not session:
         raise HTTPException(status_code=404, detail="Meeting not found")
     
     video_meet_manager.end_session(session_id)
-    
-    return {
-        "success": True,
-        "message": f"Meeting {session_id} has been ended"
-    }
+    return {"success": True, "message": f"Meeting {session_id} ended"}
 
 
 @app.get("/api/meetings")
@@ -429,61 +321,220 @@ async def list_meetings():
     }
 
 
-@app.websocket("/ws/video-analysis")
-async def video_analysis_endpoint(websocket: WebSocket):
-    """
-    Original WebSocket endpoint for direct video analysis
-    (Kept for backward compatibility)
-    """
+@app.websocket("/ws/meet/{session_id}")
+async def meet_websocket_endpoint(websocket: WebSocket, session_id: str):
+    """WebSocket endpoint for meeting sessions with OpenPose coaching"""
+    session = video_meet_manager.get_session(session_id)
+    
+    if not session:
+        await websocket.close(code=1008, reason="Meeting not found")
+        return
+    
     await websocket.accept()
-    session_id = id(websocket)
     
-    logger.info(f"📹 Frontend connected: session {session_id}")
+    # Generate unique participant ID
+    participant_id = f"participant_{uuid.uuid4().hex[:8]}"
+    video_meet_manager.add_participant(session_id, participant_id)
     
-    session = session_manager.create_session(session_id)
-    coach = CoachEngine(session, gemini_client, tts_client)
+    logger.info(f"👤 {participant_id} joined meeting {session_id}")
+    
+    # Create coaching session with unique ID
+    coaching_session_id = hash(f"{session_id}_{participant_id}")
+    coaching_session = session_manager.create_session(coaching_session_id)
+    coach = CoachEngine(coaching_session, gemini_client)
     
     frame_count = 0
     
     try:
+        await websocket.send_json({
+            "type": "welcome",
+            "message": "Connected to AI Video Coach with OpenPose",
+            "session_id": session_id,
+            "participant_id": participant_id
+        })
+        
+        logger.info(f"✅ Welcome message sent to {participant_id}")
+        
         while True:
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            
-            frame_base64 = message.get("frame")
-            if not frame_base64:
-                await websocket.send_json({"error": "No frame data"})
+            try:
+                data = await websocket.receive_text()
+                message = json.loads(data)
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ Invalid JSON received: {e}")
                 continue
             
-            frame_count += 1
+            msg_type = message.get("type", "frame")
+            logger.debug(f"📨 Received message type: {msg_type}")
             
-            frame = decode_base64_frame(frame_base64)
-            if frame is None:
-                await websocket.send_json({"error": "Failed to decode frame"})
-                continue
-            
-            frame_data = process_frame(frame, frame_count)
-            
-            session.add_frame(frame_data)
-            session.update_metrics(frame_data)
-            
-            if frame_count % 3 == 0:
-                should_coach, reason = await coach.should_provide_feedback(frame_data)
+            if msg_type == "frame":
+                frame_base64 = message.get("frame")
+                if not frame_base64:
+                    logger.warning("⚠️ Received frame message without frame data")
+                    continue
                 
-                if should_coach:
-                    await coach.provide_feedback(frame_data, reason)
-                    frame_data["coaching"] = {
-                        "triggered": True,
-                        "reason": reason
-                    }
+                frame_count += 1
+                logger.info(f"🎬 Processing frame {frame_count} from {participant_id}")
+                
+                # Decode frame
+                frame = decode_base64_frame(frame_base64)
+                if frame is None:
+                    logger.error(f"❌ Failed to decode frame {frame_count}")
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "Failed to decode frame"
+                    })
+                    continue
+                
+                # Process frame with OpenPose
+                logger.debug(f"🔍 Starting OpenPose analysis for frame {frame_count}")
+                frame_data = await process_frame(frame, frame_count)
+                
+                if frame_data is None:
+                    logger.error(f"❌ Frame processing returned None for frame {frame_count}")
+                    continue
+                
+                logger.info(f"✅ Frame {frame_count} processed successfully")
+                
+                # Update session
+                coaching_session.add_frame(frame_data)
+                coaching_session.update_metrics(frame_data)
+                
+                # Check for coaching (every 3rd frame)
+                coaching_data = None
+                if frame_count % 3 == 0:
+                    logger.info(f"🎯 Checking if coaching needed for frame {frame_count}")
+                    should_coach, reason = await coach.should_provide_feedback(frame_data)
+                    
+                    logger.info(f"🔔 Coaching check result: should_coach={should_coach}, reason={reason}")
+                    
+                    if should_coach:
+                        logger.info(f"💬 Generating coaching feedback for: {reason}")
+                        feedback = await coach.provide_feedback(frame_data, reason)
+                        coaching_data = {
+                            "triggered": True,
+                            "reason": reason,
+                            "feedback": feedback
+                        }
+                        logger.info(f"🎯 Coach feedback: {reason} -> {feedback}")
+                
+                # Send analysis with optional coaching
+                response_data = {
+                    "type": "analysis",
+                    "data": convert_to_serializable(frame_data)
+                }
+                
+                if coaching_data:
+                    response_data["coaching"] = coaching_data
+                    logger.info(f"📤 Sending analysis WITH coaching feedback")
+                else:
+                    logger.debug(f"📤 Sending analysis without coaching")
+                
+                await websocket.send_json(response_data)
             
-            serializable_data = convert_to_serializable(frame_data)
-            await websocket.send_json(serializable_data)
+            elif msg_type == "ping":
+                logger.debug("🏓 Ping received, sending pong")
+                await websocket.send_json({"type": "pong"})
+            
+            elif msg_type == "end":
+                logger.info(f"🛑 End signal received from {participant_id}")
+                break
                 
     except WebSocketDisconnect:
-        logger.info(f"📴 Frontend disconnected: session {session_id}")
+        logger.info(f"👋 {participant_id} disconnected")
     except Exception as e:
-        logger.error(f"❌ Error in session {session_id}: {e}")
+        logger.error(f"❌ Error in meeting {session_id}: {e}", exc_info=True)
+    finally:
+        video_meet_manager.remove_participant(session_id, participant_id)
+        session_manager.remove_session(coaching_session_id)
+        logger.info(f"🧹 Cleaned up session for {participant_id}")
+
+
+@app.websocket("/ws/video-analysis")
+async def video_analysis_endpoint(websocket: WebSocket):
+    """Direct video analysis WebSocket endpoint with OpenPose"""
+    await websocket.accept()
+    
+    # Create unique session ID
+    session_id = hash(f"direct_{uuid.uuid4().hex[:8]}")
+    logger.info(f"📹 Direct connection: session {session_id}")
+    
+    session = session_manager.create_session(session_id)
+    coach = CoachEngine(session, gemini_client)
+    
+    frame_count = 0
+    
+    try:
+        await websocket.send_json({
+            "type": "connected",
+            "message": "Video analysis ready with OpenPose",
+            "session_id": session_id
+        })
+        
+        while True:
+            try:
+                data = await websocket.receive_text()
+                message = json.loads(data)
+            except json.JSONDecodeError:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Invalid JSON"
+                })
+                continue
+            
+            msg_type = message.get("type", "frame")
+            
+            if msg_type == "frame":
+                frame_base64 = message.get("frame")
+                if not frame_base64:
+                    continue
+                
+                frame_count += 1
+                
+                frame = decode_base64_frame(frame_base64)
+                if frame is None:
+                    continue
+                
+                # Process with OpenPose
+                frame_data = await process_frame(frame, frame_count)
+                if frame_data is None:
+                    continue
+                
+                session.add_frame(frame_data)
+                session.update_metrics(frame_data)
+                
+                # Check for coaching
+                coaching_data = None
+                if frame_count % 3 == 0:
+                    should_coach, reason = await coach.should_provide_feedback(frame_data)
+                    
+                    if should_coach:
+                        feedback = await coach.provide_feedback(frame_data, reason)
+                        coaching_data = {
+                            "triggered": True,
+                            "reason": reason,
+                            "feedback": feedback
+                        }
+                
+                response_data = {
+                    "type": "analysis",
+                    "data": convert_to_serializable(frame_data)
+                }
+                
+                if coaching_data:
+                    response_data["coaching"] = coaching_data
+                
+                await websocket.send_json(response_data)
+            
+            elif msg_type == "ping":
+                await websocket.send_json({"type": "pong"})
+            
+            elif msg_type == "end":
+                break
+                
+    except WebSocketDisconnect:
+        logger.info(f"📴 Session {session_id} disconnected")
+    except Exception as e:
+        logger.error(f"Error in session {session_id}: {e}", exc_info=True)
     finally:
         session_manager.remove_session(session_id)
 
@@ -493,28 +544,26 @@ async def health_check():
     """Detailed health check"""
     return {
         "api": "healthy",
-        "mode": "headless_backend_with_meetings",
         "pose_detector": pose_detector is not None,
         "gemini": gemini_client.is_connected() if gemini_client else False,
-        "tts": tts_client.is_connected() if tts_client else False,
         "active_sessions": session_manager.get_session_count(),
-        "active_meetings": len(video_meet_manager.get_all_sessions())
+        "active_meetings": len(video_meet_manager.get_all_sessions()) if video_meet_manager else 0,
+        "openpose": "loaded"
     }
 
 
 @app.get("/stats")
 async def get_stats():
-    """Get current system statistics"""
+    """System statistics"""
     return {
-        "mode": "headless_backend_with_meetings",
         "active_sessions": session_manager.get_session_count(),
-        "active_meetings": len(video_meet_manager.get_all_sessions()),
+        "active_meetings": len(video_meet_manager.get_all_sessions()) if video_meet_manager else 0,
         "session_details": session_manager.get_all_stats(),
-        "meetings": video_meet_manager.get_all_sessions(),
+        "meetings": video_meet_manager.get_all_sessions() if video_meet_manager else {},
         "services": {
-            "pose_detection": pose_detector is not None,
+            "pose_detection": "OpenPose COCO",
             "gemini_ai": gemini_client.is_connected() if gemini_client else False,
-            "tts": tts_client.is_connected() if tts_client else False
+            "emotion_detection": "Haar Cascade + Analysis"
         }
     }
 
@@ -522,18 +571,8 @@ async def get_stats():
 def main():
     """Main entry point"""
     logger.info("=" * 60)
-    logger.info("AI Video Coach Backend with Meeting Support")
+    logger.info("AI Video Coach Backend with OpenPose")
     logger.info("=" * 60)
-    logger.info("")
-    logger.info("📝 Setup Instructions:")
-    logger.info("1. Ensure OpenPose models are in: openpose/models/pose/coco/")
-    logger.info("2. Set GEMINI_API_KEY in .env file")
-    logger.info("3. Start backend: python main.py")
-    logger.info("")
-    logger.info("🎥 Create a meeting:")
-    logger.info("   POST http://localhost:8000/api/create-meeting")
-    logger.info("   Returns: meeting_link to share with participants")
-    logger.info("")
     
     uvicorn.run(
         "main:app",
