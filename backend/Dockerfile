@@ -9,15 +9,16 @@ ENV PYTHONUNBUFFERED=1 \
 
 # Install system dependencies for OpenCV and OpenPose
 RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
-    libxrender-dev \
+    libxrender1 \
     libgomp1 \
     libgstreamer1.0-0 \
     libgstreamer-plugins-base1.0-0 \
     ca-certificates \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -36,7 +37,6 @@ RUN mkdir -p logs \
     websocket
 
 # Copy OpenPose model files (200MB+ - these should exist locally)
-# These are large files, ensure they're in your local directory before building
 COPY openpose/models/pose/coco/pose_iter_440000.caffemodel openpose/models/pose/coco/
 COPY openpose/models/pose/coco/pose_deploy_linevec.prototxt openpose/models/pose/coco/
 
