@@ -2,8 +2,8 @@
 // CONFIGURATION
 // ============================================================================
 
-export const BACKEND_URL = 'http://localhost:8000';
-export const WS_BASE_URL = 'ws://localhost:8000';
+export const BACKEND_URL = import.meta.env.VITE_MEET_BASE_URL;
+export const WS_BASE_URL = import.meta.env.VITE_WEBSOCKET_BASE_URL;
 
 export const POSE_PAIRS = [
   [0, 1], [1, 2], [2, 3], [3, 4],
