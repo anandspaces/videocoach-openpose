@@ -269,7 +269,7 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
     ws.onerror = (event) => {
       console.error('WebSocket error:', event);
       setConnectionStatus('error');
-      setError('Connection error - check if backend is running on port 8000');
+      setError('Connection error - check if backend is running');
     };
 
     ws.onclose = (event) => {

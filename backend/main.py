@@ -40,8 +40,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-MEET_BASE_URL = os.getenv("MEET_BASE_URL", "http://localhost:8000")
-WEBSOCKET_BASE_URL = os.getenv("WEBSOCKET_BASE_URL", "ws://localhost:8000")
+MEET_BASE_URL = os.getenv("MEET_BASE_URL")
+WEBSOCKET_BASE_URL = os.getenv("WEBSOCKET_BASE_URL")
 
 # OpenPose keypoint names (COCO 18-point model)
 POSE_NAMES = [
@@ -695,7 +695,7 @@ def main():
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
+        port=9005,
         reload=False,
         log_level="info",
         ws_ping_interval=30,  # Send ping every 30 seconds
