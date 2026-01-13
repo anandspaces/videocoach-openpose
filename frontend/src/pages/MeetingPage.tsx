@@ -26,7 +26,7 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
   const [meetingLink, setMeetingLink] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [geminiResponse, setGeminiResponse] = useState<string>('');
-  // const [logEntries, setLogEntries] = useState<string[]>([]);
+  const [coordinateLogs, setCoordinateLogs] = useState<string[]>([]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -189,9 +189,24 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
             postureAngle: data.posture?.angle || 0
           });
 
-          // Create log entry for this frame
-          // const logEntry = `FRAME ${String(data.frame_num).padStart(4, '0')} | Balance: ${data.balance?.balance_score?.toFixed(0) || 0}/100 | Posture: ${data.posture?.status || 'Unknown'} | Energy: ${data.movement?.energy || 'Unknown'} | Emotion: ${data.emotion?.emotion || 'Unknown'}`;
-          // setLogEntries(prev => [logEntry, ...prev].slice(0, 50)); // Keep last 50 entries
+          // Create coordinate log entry for this frame
+          if (data.keypoints && data.keypoints.length > 0) {
+            const timestamp = new Date().toLocaleTimeString();
+            const validKeypoints = data.keypoints
+              .map((kp, idx) => {
+                if (kp && kp.confidence > 0.2) {
+                  const pointNames = ['Nose', 'Neck', 'RShoulder', 'RElbow', 'RWrist', 'LShoulder', 'LElbow', 'LWrist', 'RHip', 'RKnee', 'RAnkle', 'LHip', 'LKnee', 'LAnkle', 'REye', 'LEye', 'REar', 'LEar'];
+                  return `${pointNames[idx]}: (${kp.x.toFixed(1)}, ${kp.y.toFixed(1)}) [${(kp.confidence * 100).toFixed(0)}%]`;
+                }
+                return null;
+              })
+              .filter(Boolean);
+
+            if (validKeypoints.length > 0) {
+              const logEntry = `[${timestamp}] Frame ${data.frame_num} | ${validKeypoints.join(' | ')}`;
+              setCoordinateLogs(prev => [logEntry, ...prev].slice(0, 30)); // Keep last 30 entries
+            }
+          }
 
           // Draw skeleton overlay from OpenPose keypoints
           const overlayCanvas = overlayCanvasRef.current;
@@ -656,21 +671,7 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
               </div>
             )}
 
-            {/* Real-Time Log Viewer */}
-            {/* {isStreaming && logEntries.length > 0 && (
-              <div className="bg-black/40 backdrop-blur-sm rounded-2xl border border-purple-500/20 p-6">
-                <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
-                  📊 Real-Time Analysis Log
-                </h3>
-                <div className="bg-black/60 rounded-lg p-4 font-mono text-xs max-h-[300px] overflow-y-auto">
-                  {logEntries.map((entry, i) => (
-                    <div key={i} className="text-green-400 mb-1 hover:bg-white/5 px-2 py-1 rounded">
-                      {entry}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )} */}
+
           </div>
 
           {/* Stats & Feedback Panel */}
@@ -724,6 +725,22 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
                 </div>
               </div>
             </div>
+
+            {/* Real-Time Coordinate Log */}
+            {isStreaming && coordinateLogs.length > 0 && (
+              <div className="bg-black/40 backdrop-blur-sm rounded-xl border border-purple-500/20 p-4">
+                <h3 className="text-sm font-bold mb-3 flex items-center gap-2">
+                  📊 Coordinates Log
+                </h3>
+                <div className="bg-black/60 rounded-lg p-3 font-mono text-xs max-h-[250px] overflow-y-auto space-y-1">
+                  {coordinateLogs.map((entry, i) => (
+                    <div key={i} className="text-green-400 hover:bg-white/5 px-2 py-1 rounded transition break-all">
+                      {entry}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* AI Coach Feedback */}
             <div className="bg-black/40 backdrop-blur-sm rounded-xl border border-purple-500/20 p-4">
