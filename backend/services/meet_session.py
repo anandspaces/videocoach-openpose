@@ -8,9 +8,14 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 from fastapi import HTTPException
+from dotenv import load_dotenv
+import os
 
+load_dotenv()
 logger = logging.getLogger(__name__)
 
+MEET_BASE_URL = os.getenv("MEET_BASE_URL", "http://localhost:8000")
+WEBSOCKET_BASE_URL = os.getenv("WEBSOCKET_BASE_URL", "ws://localhost:8000")
 
 class MeetSession:
     """Represents a video meet session"""
@@ -42,7 +47,7 @@ class MeetSession:
 class VideoMeetManager:
     """Manages video meet sessions"""
     
-    def __init__(self, base_url: str = "http://localhost:8000"):
+    def __init__(self, base_url: str = MEET_BASE_URL):
         self.base_url = base_url
         self.sessions: Dict[str, MeetSession] = {}
         logger.info("🎥 VideoMeetManager initialized")
@@ -72,7 +77,7 @@ class VideoMeetManager:
         meeting_link = f"{self.base_url}/meet/{session_id}"
         
         # Generate WebSocket endpoint for this session
-        ws_endpoint = f"ws://localhost:8000/ws/meet/{session_id}"
+        ws_endpoint = f"{WEBSOCKET_BASE_URL}/ws/meet/{session_id}"
         
         logger.info(f"✅ Created video meet session: {session_id}")
         

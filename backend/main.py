@@ -36,6 +36,13 @@ from services.meet_session import VideoMeetManager
 # Logging system
 from logger import MotionLogger
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
+MEET_BASE_URL = os.getenv("MEET_BASE_URL", "http://localhost:8000")
+WEBSOCKET_BASE_URL = os.getenv("WEBSOCKET_BASE_URL", "ws://localhost:8000")
+
 # OpenPose keypoint names (COCO 18-point model)
 POSE_NAMES = [
     "Nose", "Neck", "RShoulder", "RElbow", "RWrist",
@@ -220,10 +227,10 @@ async def lifespan(app: FastAPI):
     await gemini_client.connect()
     
     # Initialize video meet manager
-    video_meet_manager = VideoMeetManager(base_url="http://localhost:8000")
+    video_meet_manager = VideoMeetManager(base_url=MEET_BASE_URL)
     
     logger.info("✅ All services initialized")
-    logger.info("📡 Backend running on http://localhost:8000")
+    logger.info(F"📡 Backend running on {MEET_BASE_URL}")
     
     yield
     
@@ -260,8 +267,8 @@ async def root():
         "version": "2.2.0",
         "endpoints": {
             "create_meeting": "POST /api/create-meeting",
-            "video_analysis": "ws://localhost:8000/ws/video-analysis",
-            "meeting_stream": "ws://localhost:8000/ws/meet/{session_id}",
+            "video_analysis": "{WEBSOCKET_BASE_URL}/ws/video-analysis",
+            "meeting_stream": "{WEBSOCKET_BASE_URL}/ws/meet/{session_id}",
             "health": "/health",
             "stats": "/stats"
         }
@@ -292,7 +299,7 @@ async def get_meeting_info(session_id: str):
     return {
         "success": True,
         "session": session.to_dict(),
-        "ws_endpoint": f"ws://localhost:8000/ws/meet/{session_id}"
+        "ws_endpoint": f"{WEBSOCKET_BASE_URL}/ws/meet/{session_id}"
     }
 
 
@@ -308,7 +315,7 @@ async def join_meeting(session_id: str):
         "success": True,
         "message": "Meeting is ready",
         "session_id": session_id,
-        "ws_endpoint": f"ws://localhost:8000/ws/meet/{session_id}"
+        "ws_endpoint": f"{WEBSOCKET_BASE_URL}/ws/meet/{session_id}"
     }
 
 

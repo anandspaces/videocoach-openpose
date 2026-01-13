@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 GEMINI_MODEL = "gemini-3-pro-preview"
 
 # Gemini 3 Pro uses "thoughts" tokens for reasoning, so we need more output tokens
-# Usage shows: ~285 prompt + ~997 thoughts + output = need at least 1500+ total
+# Usage: ~285 prompt + ~997 thoughts + output = need at least 1500+ total
 MAX_OUTPUT_TOKENS = 2048  # Increased to accommodate thoughts + actual output
 
 class GeminiClient:
