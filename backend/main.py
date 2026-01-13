@@ -33,6 +33,17 @@ from websocket.gemini_ws import GeminiClient
 # Meeting management
 from services.meet_session import VideoMeetManager
 
+# Logging system
+from logger import MotionLogger
+
+# OpenPose keypoint names (COCO 18-point model)
+POSE_NAMES = [
+    "Nose", "Neck", "RShoulder", "RElbow", "RWrist",
+    "LShoulder", "LElbow", "LWrist", "RHip", "RKnee",
+    "RAnkle", "LHip", "LKnee", "LAnkle", "REye",
+    "LEye", "REar", "LEar"
+]
+
 # Configure logging with more detail
 logging.basicConfig(
     level=logging.DEBUG,  # Changed to DEBUG for more visibility
@@ -47,6 +58,7 @@ gemini_client = None
 pose_detector = None
 posture_analyzer = None
 executor = ThreadPoolExecutor(max_workers=4)
+session_loggers = {}  # Track loggers per session
 
 
 def convert_to_serializable(obj):
@@ -343,6 +355,19 @@ async def meet_websocket_endpoint(websocket: WebSocket, session_id: str):
     coaching_session = session_manager.create_session(coaching_session_id)
     coach = CoachEngine(coaching_session, gemini_client)
     
+    # Initialize session logger
+    motion_logger = MotionLogger(log_dir="logs", filename_prefix=f"session_{session_id[:8]}")
+    session_loggers[participant_id] = motion_logger
+    
+    logger.info(f"📝 Logger initialized for {participant_id}: {motion_logger.log_path}")
+    motion_logger.log("="*80)
+    motion_logger.log("OpenPose Motion Detection System")
+    motion_logger.log("With Posture & Emotion Analysis")
+    motion_logger.log("="*80)
+    motion_logger.log(f"Session ID: {session_id}")
+    motion_logger.log(f"Participant: {participant_id}")
+    motion_logger.log("="*80)
+    
     frame_count = 0
     
     try:
@@ -399,35 +424,115 @@ async def meet_websocket_endpoint(websocket: WebSocket, session_id: str):
                 coaching_session.add_frame(frame_data)
                 coaching_session.update_metrics(frame_data)
                 
-                # Check for coaching (every 3rd frame)
+                # Convert keypoints from dict to tuple format for logger
+                keypoints_for_logger = []
+                for kp in frame_data.get("keypoints", []):
+                    if kp is not None:
+                        keypoints_for_logger.append((kp['x'], kp['y'], kp['confidence']))
+                    else:
+                        keypoints_for_logger.append(None)
+                
+                # Log comprehensive frame analysis
+                motion_logger.log_frame_analysis(
+                    frame_num=frame_count,
+                    points=keypoints_for_logger,
+                    points_names=POSE_NAMES,
+                    joints=frame_data.get("joints", {}),
+                    symmetry=frame_data.get("symmetry", {}),
+                    cog_data=frame_data.get("balance", {}),
+                    posture=frame_data.get("posture", {}),
+                    movement=frame_data.get("movement", {}),
+                    emotion=frame_data.get("emotion", {}),
+                    activities=frame_data.get("activities", [])
+                )
+                
+                # Get Gemini response for EVERY frame (or configure interval)
+                gemini_response = None
                 coaching_data = None
-                if frame_count % 3 == 0:
-                    logger.info(f"🎯 Checking if coaching needed for frame {frame_count}")
-                    should_coach, reason = await coach.should_provide_feedback(frame_data)
+                
+                # Check every 2 frames for Gemini response (configurable)
+                if frame_count % 2 == 0:
+                    logger.info(f"🤖 Requesting Gemini analysis for frame {frame_count}")
+                    logger.debug(f"🔧 [MAIN] Preparing context for Gemini...")
                     
-                    logger.info(f"🔔 Coaching check result: should_coach={should_coach}, reason={reason}")
+                    # Prepare keypoints as a dictionary for Gemini
+                    keypoints_dict = {POSE_NAMES[i]: kp for i, kp in enumerate(frame_data.get("keypoints", [])) if kp is not None}
+                    logger.debug(f"🔧 [MAIN] Keypoints dict created with {len(keypoints_dict)} points")
+                    logger.debug(f"🔧 [MAIN] Sample keypoint (Nose): {keypoints_dict.get('Nose', 'Not found')}")
+
+                    # Build context for Gemini with actual movement data
+                    context = {
+                        "posture": frame_data.get("posture", {}),
+                        "movement": frame_data.get("movement", {}),
+                        "emotion": frame_data.get("emotion", {}),
+                        "balance": frame_data.get("balance", {}),
+                        "symmetry": frame_data.get("symmetry", {}),
+                        "joints": frame_data.get("joints", {}),  # Added for specific joint feedback
+                        "keypoints": keypoints_dict,  # Added for position-based feedback
+                        "frame_num": frame_count
+                    }
                     
-                    if should_coach:
-                        logger.info(f"💬 Generating coaching feedback for: {reason}")
-                        feedback = await coach.provide_feedback(frame_data, reason)
+                    logger.debug(f"🔧 [MAIN] Context prepared:")
+                    logger.debug(f"  - Posture status: {context['posture'].get('status', 'Unknown')}")
+                    logger.debug(f"  - Movement energy: {context['movement'].get('energy', 'Unknown')}")
+                    logger.debug(f"  - Balance score: {context['balance'].get('balance_score', 0)}")
+                    logger.debug(f"  - Joints count: {len(context['joints'])}")
+                    logger.debug(f"  - Keypoints count: {len(context['keypoints'])}")
+                    
+                    try:
+                        logger.debug("🔧 [MAIN] Calling gemini_client.send_coaching_request...")
+                        # Get Gemini feedback
+                        feedback = await gemini_client.send_coaching_request(context)
+                        logger.debug(f"🔧 [MAIN] Gemini feedback received: {feedback}")
+                        
+                        gemini_response = {
+                            "feedback": feedback,
+                            "frame_num": frame_count,
+                            "triggered": True
+                        }
+                        
+                        # Log Gemini response
+                        motion_logger.log(f"\n[GEMINI AI COACH] Frame {frame_count:04d}")
+                        motion_logger.log("-" * 80)
+                        motion_logger.log(f"  Response: {feedback}")
+                        motion_logger.log("=" * 80)
+                        
+                        logger.info(f"🤖 Gemini: {feedback}")
+                        
+                        # Also include in coaching data for backward compatibility
                         coaching_data = {
                             "triggered": True,
-                            "reason": reason,
+                            "reason": "ai_analysis",
                             "feedback": feedback
                         }
-                        logger.info(f"🎯 Coach feedback: {reason} -> {feedback}")
+                        
+                    except Exception as e:
+                        logger.error(f"❌ Gemini error: {e}")
+                        logger.error(f"❌ Error type: {type(e).__name__}")
+                        logger.error(f"❌ Context summary: posture={context.get('posture', {}).get('status')}, movement={context.get('movement', {}).get('energy')}")
+                        gemini_response = {
+                            "feedback": "Keep up the great work!",
+                            "frame_num": frame_count,
+                            "triggered": False,
+                            "error": str(e)
+                        }
                 
-                # Send analysis with optional coaching
+                # Send analysis with Gemini response
                 response_data = {
                     "type": "analysis",
                     "data": convert_to_serializable(frame_data)
                 }
                 
+                # Add Gemini response if available
+                if gemini_response:
+                    response_data["gemini"] = gemini_response
+                
+                # Add coaching data for backward compatibility
                 if coaching_data:
                     response_data["coaching"] = coaching_data
-                    logger.info(f"📤 Sending analysis WITH coaching feedback")
+                    logger.info(f"📤 Sending analysis WITH Gemini feedback")
                 else:
-                    logger.debug(f"📤 Sending analysis without coaching")
+                    logger.debug(f"📤 Sending analysis without Gemini feedback")
                 
                 await websocket.send_json(response_data)
             
@@ -444,6 +549,12 @@ async def meet_websocket_endpoint(websocket: WebSocket, session_id: str):
     except Exception as e:
         logger.error(f"❌ Error in meeting {session_id}: {e}", exc_info=True)
     finally:
+        # Close logger
+        if participant_id in session_loggers:
+            session_loggers[participant_id].close()
+            del session_loggers[participant_id]
+            logger.info(f"📝 Logger closed for {participant_id}")
+        
         video_meet_manager.remove_participant(session_id, participant_id)
         session_manager.remove_session(coaching_session_id)
         logger.info(f"🧹 Cleaned up session for {participant_id}")
@@ -579,7 +690,10 @@ def main():
         host="0.0.0.0",
         port=8000,
         reload=False,
-        log_level="info"
+        log_level="info",
+        ws_ping_interval=30,  # Send ping every 30 seconds
+        ws_ping_timeout=60,   # Wait 60 seconds for pong (increased for long Gemini calls)
+        timeout_keep_alive=75  # Keep connection alive for 75 seconds
     )
 
 
