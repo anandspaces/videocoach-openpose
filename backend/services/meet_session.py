@@ -14,8 +14,8 @@ import os
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-MEET_BASE_URL = os.getenv("MEET_BASE_URL", "http://localhost:8000")
-WEBSOCKET_BASE_URL = os.getenv("WEBSOCKET_BASE_URL", "ws://localhost:8000")
+MEET_BASE_URL = os.getenv("MEET_BASE_URL")
+WEBSOCKET_BASE_URL = os.getenv("WEBSOCKET_BASE_URL")
 
 class MeetSession:
     """Represents a video meet session"""
