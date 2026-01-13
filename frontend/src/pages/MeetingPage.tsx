@@ -482,23 +482,6 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
             </div>
 
             <div className="flex items-center gap-3">
-              <button
-                onClick={copyMeetingLink}
-                className="flex items-center gap-2 px-3 py-2 bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/30 rounded-lg transition text-sm"
-              >
-                {copied ? (
-                  <>
-                    <Check className="w-4 h-4" />
-                    Copied!
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-4 h-4" />
-                    Share Link
-                  </>
-                )}
-              </button>
-
               <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm ${connectionStatus === 'connected' ? 'bg-green-500/20 text-green-400' :
                 connectionStatus === 'connecting' ? 'bg-yellow-500/20 text-yellow-400' :
                   connectionStatus === 'error' ? 'bg-red-500/20 text-red-400' :
