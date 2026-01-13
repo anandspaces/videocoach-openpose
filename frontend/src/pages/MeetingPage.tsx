@@ -25,6 +25,8 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
   const [copied, setCopied] = useState(false);
   const [meetingLink, setMeetingLink] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [geminiResponse, setGeminiResponse] = useState<string>('');
+  // const [logEntries, setLogEntries] = useState<string[]>([]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -118,6 +120,20 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
     ctx.shadowBlur = 0;
   }, []);
 
+  // TTS Helper function
+  const speak = useCallback((text: string, rate: number = 1.0) => {
+    if ('speechSynthesis' in window) {
+      // Cancel any ongoing speech
+      window.speechSynthesis.cancel();
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = rate;
+      utterance.pitch = 1.0;
+      utterance.volume = 0.9;
+      window.speechSynthesis.speak(utterance);
+    }
+  }, []);
+
   // WebSocket connection with reconnection logic
   const connectWebSocket = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -136,6 +152,9 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
       setConnectionStatus('connected');
       setError(null);
       console.log('✅ WebSocket connected to OpenPose backend');
+
+      // Welcome greeting
+      speak('Welcome to your AI coaching session. I am ready to help you!');
     };
 
     ws.onmessage = (event: MessageEvent) => {
@@ -145,6 +164,7 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
         // Handle welcome message
         if (response.type === 'welcome') {
           console.log('👋 Welcome:', response.message);
+          speak(response.message || 'Connected to AI Video Coach with OpenPose');
           return;
         }
 
@@ -169,6 +189,10 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
             postureAngle: data.posture?.angle || 0
           });
 
+          // Create log entry for this frame
+          // const logEntry = `FRAME ${String(data.frame_num).padStart(4, '0')} | Balance: ${data.balance?.balance_score?.toFixed(0) || 0}/100 | Posture: ${data.posture?.status || 'Unknown'} | Energy: ${data.movement?.energy || 'Unknown'} | Emotion: ${data.emotion?.emotion || 'Unknown'}`;
+          // setLogEntries(prev => [logEntry, ...prev].slice(0, 50)); // Keep last 50 entries
+
           // Draw skeleton overlay from OpenPose keypoints
           const overlayCanvas = overlayCanvasRef.current;
           if (overlayCanvas && data.keypoints) {
@@ -178,7 +202,27 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
             }
           }
 
-          // Handle AI coaching feedback
+          // Handle Gemini AI response (new field)
+          if (response.gemini?.triggered && response.gemini.feedback) {
+            const geminiText = response.gemini.feedback;
+            setGeminiResponse(geminiText);
+
+            console.log('🤖 Gemini AI:', geminiText);
+
+            // Speak the feedback
+            speak(geminiText);
+
+            // Also add to feedback list
+            const timestamp = new Date().toLocaleTimeString();
+            const newFeedback: FeedbackItem = {
+              time: timestamp,
+              text: geminiText,
+              reason: 'ai_analysis'
+            };
+            setRecentFeedback(prev => [newFeedback, ...prev].slice(0, 5));
+          }
+
+          // Handle AI coaching feedback (backward compatibility)
           if (response.coaching?.triggered && response.coaching.feedback) {
             const timestamp = new Date().toLocaleTimeString();
             const newFeedback: FeedbackItem = {
@@ -189,14 +233,8 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
 
             setRecentFeedback(prev => [newFeedback, ...prev].slice(0, 5));
 
-            // Speak feedback (optional)
-            if ('speechSynthesis' in window) {
-              const utterance = new SpeechSynthesisUtterance(response.coaching.feedback);
-              utterance.rate = 1.0;
-              utterance.pitch = 1.0;
-              utterance.volume = 0.8;
-              window.speechSynthesis.speak(utterance);
-            }
+            // Speak feedback
+            speak(response.coaching.feedback);
 
             console.log('🎯 Coach:', response.coaching.feedback);
           }
@@ -233,7 +271,7 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
         }, 3000);
       }
     };
-  }, [sessionId, isStreaming, stats.frameCount, drawSkeleton]);
+  }, [sessionId, isStreaming, stats.frameCount, drawSkeleton, speak]);
 
   // Capture and send video frames to OpenPose backend
   const captureAndSendFrame = useCallback(() => {
@@ -305,6 +343,9 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
       setIsStreaming(true);
       console.log('🎥 Streaming started - sending frames to OpenPose backend');
 
+      // Voice confirmation
+      speak('Session started. Show me your best form!', 1.1);
+
     } catch (err) {
       console.error('Camera access error:', err);
       setError('Could not access camera. Please allow camera permissions.');
@@ -355,6 +396,9 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
     setIsStreaming(false);
     setConnectionStatus('disconnected');
     console.log('✅ Stream stopped');
+
+    // Voice confirmation
+    speak('Session ended. Great work today!');
   };
 
   // Copy meeting link to clipboard
@@ -377,7 +421,22 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      stopStreaming();
+      // Silent cleanup - don't speak on unmount
+      if (frameIntervalRef.current) {
+        clearInterval(frameIntervalRef.current);
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
     };
   }, []);
 
@@ -426,9 +485,9 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
               </button>
 
               <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm ${connectionStatus === 'connected' ? 'bg-green-500/20 text-green-400' :
-                  connectionStatus === 'connecting' ? 'bg-yellow-500/20 text-yellow-400' :
-                    connectionStatus === 'error' ? 'bg-red-500/20 text-red-400' :
-                      'bg-gray-500/20 text-gray-400'
+                connectionStatus === 'connecting' ? 'bg-yellow-500/20 text-yellow-400' :
+                  connectionStatus === 'error' ? 'bg-red-500/20 text-red-400' :
+                    'bg-gray-500/20 text-gray-400'
                 }`}>
                 {connectionStatus === 'connected' ? (
                   <Wifi className="w-4 h-4" />
@@ -453,12 +512,12 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
       )}
 
       {/* Main Content */}
-      <div className="max-w-7xl mx-auto p-6">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="max-w-7xl mx-auto p-3 h-[calc(100vh-80px)] overflow-y-auto">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 h-full">
 
           {/* Video Feed Section */}
-          <div className="lg:col-span-2 space-y-4">
-            <div className="bg-black/40 backdrop-blur-sm rounded-2xl border border-purple-500/20 overflow-hidden">
+          <div className="lg:col-span-2 space-y-3">
+            <div className="bg-black/40 backdrop-blur-sm rounded-xl border border-purple-500/20 overflow-hidden">
               <div className="relative aspect-video bg-black">
                 {/* Video Element */}
                 <video
@@ -482,9 +541,9 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
                 {!isStreaming && (
                   <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm">
                     <div className="text-center">
-                      <Camera className="w-16 h-16 mx-auto mb-4 text-purple-400" />
-                      <p className="text-lg mb-2">Ready to Start</p>
-                      <p className="text-sm text-gray-400">OpenPose AI Coach Ready</p>
+                      <Camera className="w-12 h-12 mx-auto mb-3 text-purple-400" />
+                      <p className="text-base mb-1">Ready to Start</p>
+                      <p className="text-xs text-gray-400">AI Coach Ready</p>
                     </div>
                   </div>
                 )}
@@ -492,50 +551,48 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
                 {/* Live stats overlay */}
                 {isStreaming && (
                   <>
-                    <div className="absolute top-4 left-4 space-y-2">
-                      <div className="bg-black/70 backdrop-blur-sm px-3 py-2 rounded-lg">
-                        <div className="text-xs text-purple-300">Balance</div>
-                        <div className="text-lg font-bold">{stats.balance.toFixed(0)}/100</div>
+                    <div className="absolute top-2 left-2 space-y-1">
+                      <div className="bg-black/70 backdrop-blur-sm px-2 py-1 rounded text-xs">
+                        <div className="text-purple-300">Balance</div>
+                        <div className="text-sm font-bold">{stats.balance.toFixed(0)}/100</div>
                       </div>
-                      <div className="bg-black/70 backdrop-blur-sm px-3 py-2 rounded-lg">
-                        <div className="text-xs text-purple-300">Emotion</div>
-                        <div className="text-sm font-bold">{stats.emotion}</div>
-                        <div className="text-xs text-gray-400">{stats.emotionConfidence.toFixed(0)}%</div>
+                      <div className="bg-black/70 backdrop-blur-sm px-2 py-1 rounded text-xs">
+                        <div className="text-purple-300">Emotion</div>
+                        <div className="text-xs font-bold">{stats.emotion}</div>
                       </div>
-                      <div className="bg-black/70 backdrop-blur-sm px-3 py-2 rounded-lg">
-                        <div className="text-xs text-purple-300">Posture</div>
-                        <div className={`text-sm font-bold ${getPostureColor(stats.posture)}`}>
+                      <div className="bg-black/70 backdrop-blur-sm px-2 py-1 rounded text-xs">
+                        <div className="text-purple-300">Posture</div>
+                        <div className={`text-xs font-bold ${getPostureColor(stats.posture)}`}>
                           {stats.posture}
                         </div>
-                        <div className="text-xs text-gray-400">{stats.postureAngle.toFixed(1)}°</div>
                       </div>
                     </div>
 
-                    <div className="absolute top-4 right-4 bg-black/70 backdrop-blur-sm px-3 py-2 rounded-lg">
-                      <div className="text-xs text-purple-300">Frame</div>
-                      <div className="text-lg font-bold">{stats.frameCount}</div>
+                    <div className="absolute top-2 right-2 bg-black/70 backdrop-blur-sm px-2 py-1 rounded text-xs">
+                      <div className="text-purple-300">Frame</div>
+                      <div className="text-sm font-bold">{stats.frameCount}</div>
                     </div>
                   </>
                 )}
               </div>
 
               {/* Controls */}
-              <div className="p-4 bg-black/20 border-t border-purple-500/20">
-                <div className="flex items-center justify-center gap-4">
+              <div className="p-3 bg-black/20 border-t border-purple-500/20">
+                <div className="flex items-center justify-center gap-3">
                   {!isStreaming ? (
                     <button
                       onClick={startStreaming}
-                      className="flex items-center gap-2 px-6 py-3 bg-purple-600 hover:bg-purple-700 rounded-xl font-semibold transition"
+                      className="flex items-center gap-2 px-5 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg font-semibold transition text-sm"
                     >
-                      <Play className="w-5 h-5" />
+                      <Play className="w-4 h-4" />
                       Start Session
                     </button>
                   ) : (
                     <button
                       onClick={stopStreaming}
-                      className="flex items-center gap-2 px-6 py-3 bg-red-600 hover:bg-red-700 rounded-xl font-semibold transition"
+                      className="flex items-center gap-2 px-5 py-2 bg-red-600 hover:bg-red-700 rounded-lg font-semibold transition text-sm"
                     >
-                      <Pause className="w-5 h-5" />
+                      <Pause className="w-4 h-4" />
                       Stop Session
                     </button>
                   )}
@@ -585,24 +642,53 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
                 </div>
               </div>
             )}
+
+            {/* Gemini AI Response Card */}
+            {geminiResponse && (
+              <div className="bg-gradient-to-br from-purple-600/30 to-pink-600/30 backdrop-blur-sm rounded-xl border-2 border-purple-500/50 p-4 shadow-lg">
+                <h3 className="text-base font-bold mb-2 flex items-center gap-2">
+                  <span className="text-xl">🤖</span>
+                  AI Coach
+                </h3>
+                <div className="bg-black/40 rounded-lg p-3 border border-purple-500/30">
+                  <p className="text-sm leading-relaxed font-medium">{geminiResponse}</p>
+                </div>
+              </div>
+            )}
+
+            {/* Real-Time Log Viewer */}
+            {/* {isStreaming && logEntries.length > 0 && (
+              <div className="bg-black/40 backdrop-blur-sm rounded-2xl border border-purple-500/20 p-6">
+                <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
+                  📊 Real-Time Analysis Log
+                </h3>
+                <div className="bg-black/60 rounded-lg p-4 font-mono text-xs max-h-[300px] overflow-y-auto">
+                  {logEntries.map((entry, i) => (
+                    <div key={i} className="text-green-400 mb-1 hover:bg-white/5 px-2 py-1 rounded">
+                      {entry}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )} */}
           </div>
 
           {/* Stats & Feedback Panel */}
-          <div className="space-y-4">
+          <div className="space-y-3">
             {/* Live Metrics */}
-            <div className="bg-black/40 backdrop-blur-sm rounded-2xl border border-purple-500/20 p-6">
-              <h2 className="text-lg font-bold mb-4 flex items-center gap-2">
-                <Zap className="w-5 h-5 text-yellow-400" />
+            <div className="bg-black/40 backdrop-blur-sm rounded-xl border border-purple-500/20 p-4">
+              <h2 className="text-base font-bold mb-3 flex items-center gap-2">
+                <Zap className="w-4 h-4 text-yellow-400" />
                 Live Metrics
               </h2>
 
-              <div className="space-y-4">
+              <div className="space-y-3">
                 <div>
-                  <div className="flex justify-between text-sm mb-1">
+                  <div className="flex justify-between text-xs mb-1">
                     <span className="text-gray-400">Balance</span>
                     <span className="font-semibold">{stats.balance.toFixed(0)}/100</span>
                   </div>
-                  <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+                  <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
                     <div
                       className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-300"
                       style={{ width: `${stats.balance}%` }}
@@ -611,63 +697,63 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
                 </div>
 
                 <div>
-                  <div className="flex justify-between text-sm mb-1">
+                  <div className="flex justify-between text-xs mb-1">
                     <span className="text-gray-400">Energy</span>
-                    <span className="font-semibold">{stats.energy}</span>
+                    <span className="font-semibold text-xs">{stats.energy}</span>
                   </div>
                 </div>
 
                 <div>
-                  <div className="flex justify-between text-sm mb-1">
+                  <div className="flex justify-between text-xs mb-1">
                     <span className="text-gray-400">Posture</span>
-                    <span className={`font-semibold ${getPostureColor(stats.posture)}`}>
+                    <span className={`font-semibold text-xs ${getPostureColor(stats.posture)}`}>
                       {stats.posture}
                     </span>
                   </div>
                 </div>
 
                 <div>
-                  <div className="flex justify-between text-sm mb-1">
+                  <div className="flex justify-between text-xs mb-1">
                     <span className="text-gray-400">Emotion</span>
-                    <span className="font-semibold">{stats.emotion}</span>
+                    <span className="font-semibold text-xs">{stats.emotion}</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Heart className="w-4 h-4 text-pink-400" />
-                    <span className="text-sm">{stats.emotionConfidence.toFixed(0)}%</span>
+                    <Heart className="w-3 h-3 text-pink-400" />
+                    <span className="text-xs">{stats.emotionConfidence.toFixed(0)}%</span>
                   </div>
                 </div>
               </div>
             </div>
 
             {/* AI Coach Feedback */}
-            <div className="bg-black/40 backdrop-blur-sm rounded-2xl border border-purple-500/20 p-6">
-              <h2 className="text-lg font-bold mb-4 flex items-center gap-2">
-                <Volume2 className="w-5 h-5 text-purple-400" />
-                AI Coach Feedback
+            <div className="bg-black/40 backdrop-blur-sm rounded-xl border border-purple-500/20 p-4">
+              <h2 className="text-base font-bold mb-3 flex items-center gap-2">
+                <Volume2 className="w-4 h-4 text-purple-400" />
+                Feedback History
               </h2>
 
               {recentFeedback.length === 0 ? (
-                <div className="text-center py-8 text-gray-400">
-                  <Volume2 className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                  <p className="text-sm">No feedback yet</p>
+                <div className="text-center py-6 text-gray-400">
+                  <Volume2 className="w-6 h-6 mx-auto mb-2 opacity-50" />
+                  <p className="text-xs">No feedback yet</p>
                   <p className="text-xs mt-1">Start moving to receive coaching</p>
                 </div>
               ) : (
-                <div className="space-y-3 max-h-[400px] overflow-y-auto">
+                <div className="space-y-2 max-h-[300px] overflow-y-auto">
                   {recentFeedback.map((feedback, i) => (
                     <div
                       key={`${feedback.time}-${i}`}
-                      className="bg-purple-500/10 border border-purple-500/20 rounded-lg p-3 animate-fade-in"
+                      className="bg-purple-500/10 border border-purple-500/20 rounded-lg p-2 animate-fade-in"
                     >
-                      <div className="flex items-start justify-between gap-2 mb-2">
+                      <div className="flex items-start justify-between gap-2 mb-1">
                         <div className="text-xs text-purple-300">{feedback.time}</div>
                         {feedback.reason && (
-                          <div className="text-xs px-2 py-0.5 bg-purple-500/20 rounded">
+                          <div className="text-xs px-1.5 py-0.5 bg-purple-500/20 rounded">
                             {feedback.reason.replace(/_/g, ' ')}
                           </div>
                         )}
                       </div>
-                      <div className="text-sm leading-relaxed">{feedback.text}</div>
+                      <div className="text-xs leading-relaxed">{feedback.text}</div>
                     </div>
                   ))}
                 </div>

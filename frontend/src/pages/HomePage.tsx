@@ -1,7 +1,6 @@
-import React, { useState, useEffect } from 'react';
-import { Activity, Video, Users, Link as LinkIcon, ArrowLeft } from 'lucide-react';
+import React, { useState } from 'react';
+import { Activity, Video, Users } from 'lucide-react';
 import { BACKEND_URL } from '../config';
-import type { MeetingSession } from '../types';
 
 interface HomePageProps {
   onNavigate: (path: string) => void;
@@ -10,18 +9,18 @@ interface HomePageProps {
 const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
   const [isCreating, setIsCreating] = useState(false);
   const [joinSessionId, setJoinSessionId] = useState('');
-  const [recentSessions, setRecentSessions] = useState<MeetingSession[]>([]);
+  // const [recentSessions, setRecentSessions] = useState<MeetingSession[]>([]);
 
-  useEffect(() => {
-    const saved = localStorage.getItem('recent_sessions');
-    if (saved) {
-      try {
-        setRecentSessions(JSON.parse(saved));
-      } catch (e) {
-        console.error('Failed to load recent sessions:', e);
-      }
-    }
-  }, []);
+  // useEffect(() => {
+  //   const saved = localStorage.getItem('recent_sessions');
+  //   if (saved) {
+  //     try {
+  //       setRecentSessions(JSON.parse(saved));
+  //     } catch (e) {
+  //       console.error('Failed to load recent sessions:', e);
+  //     }
+  //   }
+  // }, []);
 
   const createMeeting = async () => {
     setIsCreating(true);
@@ -35,16 +34,16 @@ const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
 
       const data = await response.json();
 
-      const newSession: MeetingSession = {
-        session_id: data.session_id,
-        meeting_link: data.meeting_link,
-        ws_endpoint: data.ws_endpoint,
-        created_at: new Date().toISOString()
-      };
+      // const newSession: MeetingSession = {
+      //   session_id: data.session_id,
+      //   meeting_link: data.meeting_link,
+      //   ws_endpoint: data.ws_endpoint,
+      //   created_at: new Date().toISOString()
+      // };
 
-      const updated = [newSession, ...recentSessions.slice(0, 4)];
-      setRecentSessions(updated);
-      localStorage.setItem('recent_sessions', JSON.stringify(updated));
+      // const updated = [newSession, ...recentSessions.slice(0, 4)];
+      // setRecentSessions(updated);
+      // localStorage.setItem('recent_sessions', JSON.stringify(updated));
 
       onNavigate(`/meet/${data.session_id}`);
     } catch (error) {
@@ -129,7 +128,7 @@ const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
           </div>
         </div>
 
-        {recentSessions.length > 0 && (
+        {/* {recentSessions.length > 0 && (
           <div className="bg-black/40 backdrop-blur-sm rounded-2xl border border-purple-500/20 p-6">
             <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
               <LinkIcon className="w-5 h-5" />
@@ -157,7 +156,7 @@ const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
               ))}
             </div>
           </div>
-        )}
+        )} */}
       </div>
     </div>
   );
