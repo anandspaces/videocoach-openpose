@@ -20,7 +20,7 @@ GEMINI_MODEL = "gemini-3-pro-preview"
 
 # Gemini 3 Pro uses "thoughts" tokens for reasoning, so we need more output tokens
 # Usage: ~285 prompt + ~997 thoughts + output = need at least 1500+ total
-MAX_OUTPUT_TOKENS = 2048  # Increased to accommodate thoughts + actual output
+MAX_OUTPUT_TOKENS = 8000  # Increased for detailed yoga coaching instructions
 
 class GeminiClient:
     """Real Gemini AI integration using google-genai (modern SDK)"""
@@ -198,18 +198,42 @@ class GeminiClient:
         logger.debug(f"🔧 [BUILD_PROMPT] Positions string: {positions_str}")
         logger.debug(f"🔧 [BUILD_PROMPT] Joints string: {joints_str}")
         
-        # Simplified prompt to reduce token usage (Gemini 3 Pro uses lots of tokens for "thoughts")
-        prompt = f"""Fitness coach analyzing pose data. Frame {frame_num}.
+        # Comprehensive yoga coaching prompt - teaches proper form and alignment
+        prompt = f"""You are an expert yoga instructor analyzing a student's pose in real-time.
 
-Body positions: {positions_str}
-Joints: {joints_str}
-Energy: {movement_energy}, Balance: {balance_score:.0f}/100
-Emotion: {emotion_state}
+CURRENT FRAME DATA (Frame {frame_num}):
+- Body Keypoints: {positions_str}
+- Joint Angles: {joints_str}
+- Balance Score: {balance_score:.0f}/100
+- Energy Level: {movement_energy}
+- Emotional State: {emotion_state}
 
-Give ONE specific 10-word coaching tip based on the positions above:"""
+YOUR ROLE:
+Analyze the student's current body position and provide ONE specific, actionable yoga coaching instruction.
+
+FOCUS ON:
+1. **Alignment**: Check if joints are properly aligned (shoulders over hips, knees over ankles, etc.)
+2. **Form**: Identify if the pose resembles a yoga asana (Mountain Pose, Warrior, Tree Pose, Downward Dog, etc.)
+3. **Balance**: If balance is low, suggest grounding techniques or adjustments
+4. **Breathing**: Remind about breath coordination with movement
+5. **Safety**: Warn about potential strain or misalignment that could cause injury
+
+INSTRUCTION FORMAT:
+Provide a clear, encouraging instruction in 15-20 words that includes:
+- What to adjust (e.g., "lift chest", "bend knees", "engage core")
+- Why it matters (e.g., "for better alignment", "to protect lower back")
+- Optional: Name the pose if recognizable
+
+EXAMPLES:
+- "Engage your core and lift through the crown of your head for proper Mountain Pose alignment."
+- "Bend your knees slightly and press feet firmly down to improve balance and stability."
+- "Relax your shoulders away from ears and breathe deeply to release upper body tension."
+- "Align your hips over ankles and lengthen your spine for a strong Warrior stance."
+
+Your coaching instruction:"""
         
         logger.debug(f"🔧 [BUILD_PROMPT] Complete prompt:\n{prompt}")
-        logger.info(f"📝 [BUILD_PROMPT] Prompt built successfully with {len(key_positions)} keypoints and {len(joint_info)} joints")
+        logger.info(f"📝 [BUILD_PROMPT] Yoga coaching prompt built with {len(key_positions)} keypoints and {len(joint_info)} joints")
         
         return prompt
 
@@ -227,10 +251,10 @@ Give ONE specific 10-word coaching tip based on the positions above:"""
             
             logger.debug("🔧 [GEMINI_API] Preparing API configuration...")
             config = types.GenerateContentConfig(
-                temperature=0.7,  # Reduced for more focused responses
-                top_p=0.9,
-                top_k=20,
-                max_output_tokens=MAX_OUTPUT_TOKENS,  # Increased for thoughts + output
+                temperature=0.8,  # Slightly higher for more varied yoga instructions
+                top_p=0.95,
+                top_k=40,
+                max_output_tokens=MAX_OUTPUT_TOKENS,  # 8000 tokens for detailed instructions
                 response_modalities=["TEXT"],
             )
             logger.debug(f"🔧 [GEMINI_API] Config: temp={config.temperature}, top_p={config.top_p}, max_tokens={config.max_output_tokens}")
