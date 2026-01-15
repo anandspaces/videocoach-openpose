@@ -5,7 +5,7 @@ Analyzes body posture, movement, and activities from pose keypoints
 
 import cv2
 import numpy as np
-from emotion_detector import SimpleEmotionDetector
+from src.core.emotion_detector import SimpleEmotionDetector
 
 
 class PostureAnalyzer:

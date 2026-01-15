@@ -21,20 +21,24 @@ import uvicorn
 from concurrent.futures import ThreadPoolExecutor
 
 # Pose detection imports
-from pose_detector import PoseDetector
-from posture_analyzer import PostureAnalyzer
-from body_science import BodyScience
+from src.core.pose_detector import PoseDetector
+from src.core.posture_analyzer import PostureAnalyzer
+from src.core.body_science import BodyScience
 
 # Backend service imports
-from services.coach_engine import CoachEngine
-from services.state_manager import SessionManager
-from websocket.gemini_ws import GeminiClient
+from src.services.coach_engine import CoachEngine
+from src.services.state_manager import SessionManager
+from src.websocket.gemini_ws import GeminiClient
+
+# Yoga coaching system
+from src.services.yoga_coach_engine import YogaCoachEngine
+from src.services.asana_registry import list_asanas, get_asana
 
 # Meeting management
-from services.meet_session import VideoMeetManager
+from src.services.meet_session import VideoMeetManager
 
 # Logging system
-from logger import MotionLogger
+from src.core.logger import MotionLogger
 
 from dotenv import load_dotenv
 
@@ -211,8 +215,8 @@ async def lifespan(app: FastAPI):
     
     # Initialize pose detector
     logger.info("🎥 Initializing OpenPose detector...")
-    model_file = "openpose/models/pose/coco/pose_iter_440000.caffemodel"
-    config_file = "openpose/models/pose/coco/pose_deploy_linevec.prototxt"
+    model_file = "src/openpose/models/pose/coco/pose_iter_440000.caffemodel"
+    config_file = "src/openpose/models/pose/coco/pose_deploy_linevec.prototxt"
     
     if not os.path.exists(model_file):
         logger.error(f"Model not found at {model_file}")
@@ -340,6 +344,53 @@ async def list_meetings():
     }
 
 
+@app.get("/api/asanas")
+async def list_available_asanas():
+    """List all available yoga asanas"""
+    asanas = list_asanas()
+    return {
+        "success": True,
+        "asanas": asanas
+    }
+
+
+@app.get("/api/asana/{asana_id}")
+async def get_asana_info(asana_id: str):
+    """Get information about a specific asana"""
+    asana = get_asana(asana_id)
+    
+    if not asana:
+        raise HTTPException(status_code=404, detail="Asana not found")
+    
+    return {
+        "success": True,
+        "asana": {
+            "id": asana_id,
+            "name": asana.name,
+            "sanskrit_name": asana.sanskrit_name,
+            "required_joints": asana.required_joints,
+            "angle_constraints": {
+                joint: {
+                    "min": constraint.min_angle,
+                    "max": constraint.max_angle,
+                    "ideal": constraint.ideal_angle,
+                    "tolerance": constraint.tolerance,
+                    "priority": constraint.priority.name
+                }
+                for joint, constraint in asana.angle_constraints.items()
+            },
+            "alignment_rules": [
+                {
+                    "id": rule.rule_id,
+                    "description": rule.description,
+                    "priority": rule.priority.name
+                }
+                for rule in asana.alignment_rules
+            ]
+        }
+    }
+
+
 @app.websocket("/ws/meet/{session_id}")
 async def meet_websocket_endpoint(websocket: WebSocket, session_id: str):
     """WebSocket endpoint for meeting sessions with OpenPose coaching"""
@@ -360,6 +411,14 @@ async def meet_websocket_endpoint(websocket: WebSocket, session_id: str):
     # Create coaching session with unique ID
     coaching_session_id = hash(f"{session_id}_{participant_id}")
     coaching_session = session_manager.create_session(coaching_session_id)
+    
+    # Initialize YOGA coach engine (deterministic)
+    yoga_coach = YogaCoachEngine(session_id=str(coaching_session_id))
+    
+    # Set default asana (can be changed via message)
+    yoga_coach.set_asana('tree_pose')  # Default to Tree Pose
+    
+    # Keep old coach for backward compatibility (optional)
     coach = CoachEngine(coaching_session, gemini_client)
     
     # Initialize session logger
@@ -397,6 +456,25 @@ async def meet_websocket_endpoint(websocket: WebSocket, session_id: str):
             
             msg_type = message.get("type", "frame")
             logger.debug(f"📨 Received message type: {msg_type}")
+            
+            # Handle asana selection
+            if msg_type == "set_asana":
+                asana_name = message.get("asana")
+                if yoga_coach.set_asana(asana_name):
+                    await websocket.send_json({
+                        "type": "asana_set",
+                        "asana": asana_name,
+                        "success": True
+                    })
+                    logger.info(f"🧘 Asana changed to: {asana_name}")
+                else:
+                    await websocket.send_json({
+                        "type": "asana_set",
+                        "asana": asana_name,
+                        "success": False,
+                        "error": "Unknown asana"
+                    })
+                continue
             
             if msg_type == "frame":
                 frame_base64 = message.get("frame")
@@ -452,6 +530,28 @@ async def meet_websocket_endpoint(websocket: WebSocket, session_id: str):
                     emotion=frame_data.get("emotion", {}),
                     activities=frame_data.get("activities", [])
                 )
+                
+                # ========================================
+                # YOGA COACH SYSTEM (Deterministic)
+                # ========================================
+                import time
+                timestamp = time.time()
+                
+                # Update yoga coach with frame data
+                yoga_decision = yoga_coach.update(frame_data, timestamp)
+                
+                # Log yoga coach decision
+                if yoga_decision.get('should_coach'):
+                    motion_logger.log(f"\n[YOGA COACH] Frame {frame_count:04d}")
+                    motion_logger.log("-" * 80)
+                    motion_logger.log(f"  Asana: {yoga_decision['asana']}")
+                    motion_logger.log(f"  State: {yoga_decision['state']}")
+                    motion_logger.log(f"  Error: {yoga_decision['error_code']}")
+                    motion_logger.log(f"  Severity: {yoga_decision['severity']:.2f}")
+                    motion_logger.log(f"  Priority: {yoga_decision['priority']}")
+                    motion_logger.log(f"  Message: {yoga_decision['message']}")
+                    motion_logger.log("=" * 80)
+                    logger.info(f"🧘 Yoga Coach: {yoga_decision['message']}")
                 
                 # Get Gemini response for EVERY frame (or configure interval)
                 gemini_response = None
@@ -524,13 +624,16 @@ async def meet_websocket_endpoint(websocket: WebSocket, session_id: str):
                             "error": str(e)
                         }
                 
-                # Send analysis with Gemini response
+                # Send analysis with yoga coach decision and optional Gemini
                 response_data = {
                     "type": "analysis",
                     "data": convert_to_serializable(frame_data)
                 }
                 
-                # Add Gemini response if available
+                # Add YOGA COACH decision (primary coaching system)
+                response_data["yoga_coach"] = yoga_decision
+                
+                # Add Gemini response if available (optional polishing)
                 if gemini_response:
                     response_data["gemini"] = gemini_response
                 
@@ -538,8 +641,10 @@ async def meet_websocket_endpoint(websocket: WebSocket, session_id: str):
                 if coaching_data:
                     response_data["coaching"] = coaching_data
                     logger.info(f"📤 Sending analysis WITH Gemini feedback")
+                elif yoga_decision.get('should_coach'):
+                    logger.info(f"📤 Sending analysis WITH Yoga Coach feedback")
                 else:
-                    logger.debug(f"📤 Sending analysis without Gemini feedback")
+                    logger.debug(f"📤 Sending analysis without feedback")
                 
                 await websocket.send_json(response_data)
             
@@ -695,8 +800,8 @@ def main():
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=9005,
-        reload=False,
+        port=8000,
+        reload=True,
         log_level="info",
         ws_ping_interval=30,  # Send ping every 30 seconds
         ws_ping_timeout=60,   # Wait 60 seconds for pong (increased for long Gemini calls)

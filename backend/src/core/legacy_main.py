@@ -8,11 +8,11 @@ Main application file that orchestrates all modules.
 import cv2
 import os
 
-from pose_detector import PoseDetector
-from posture_analyzer import PostureAnalyzer
-from body_science import BodyScience
-from visualization import draw_skeleton, draw_info_panel
-from logger import MotionLogger
+from src.core.pose_detector import PoseDetector
+from src.core.posture_analyzer import PostureAnalyzer
+from src.core.body_science import BodyScience
+from src.core.visualization import draw_skeleton, draw_info_panel
+from src.core.logger import MotionLogger
 
 
 def main():
@@ -25,8 +25,8 @@ def main():
     logger.log("=" * 60)
     
     # Load pose detector
-    model_file = "openpose/models/pose/coco/pose_iter_440000.caffemodel"
-    config_file = "openpose/models/pose/coco/pose_deploy_linevec.prototxt"
+    model_file = "src/openpose/models/pose/coco/pose_iter_440000.caffemodel"
+    config_file = "src/openpose/models/pose/coco/pose_deploy_linevec.prototxt"
     
     if not os.path.exists(model_file):
         logger.log(f"Error: Model not found at {model_file}")

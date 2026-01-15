@@ -9,7 +9,7 @@ import asyncio
 from fastapi import WebSocket
 from typing import Dict, Any
 
-from services.coach_engine import CoachEngine
+from src.services.coach_engine import CoachEngine
 
 logger = logging.getLogger(__name__)
 
