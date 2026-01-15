@@ -1,8 +1,6 @@
 """
-Headless AI Video Coach System - OpenPose Integration
-Server-side backend for React frontend
+AI Video Coach System - OpenPose Integration
 Integrates with OpenPose motion analysis data
-FIXED: Enhanced logging for debugging
 """
 
 import cv2
@@ -28,7 +26,7 @@ from src.core.body_science import BodyScience
 # Backend service imports
 from src.services.coach_engine import CoachEngine
 from src.services.state_manager import SessionManager
-from src.websocket.gemini_ws import GeminiClient
+from src.services.gemini_ws import GeminiClient
 
 # Yoga coaching system
 from src.services.yoga_coach_engine import YogaCoachEngine
