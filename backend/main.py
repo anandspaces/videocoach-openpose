@@ -22,11 +22,15 @@ from concurrent.futures import ThreadPoolExecutor
 from src.core.pose_detector import PoseDetector
 from src.core.posture_analyzer import PostureAnalyzer
 from src.core.body_science import BodyScience
+from src.core.pose_buffer import CircularPoseBuffer
 
 # Backend service imports
 from src.services.coach_engine import CoachEngine
 from src.services.state_manager import SessionManager
 from src.services.gemini_ws import GeminiClient
+from src.services.feedback_manager import FeedbackManager, FeedbackType, FeedbackPriority
+from src.services.context_builder import ContextBuilder
+from src.services.voice_handler import VoiceHandler
 
 # Yoga coaching system
 from src.services.yoga_coach_engine import YogaCoachEngine
@@ -66,8 +70,12 @@ video_meet_manager = None
 gemini_client = None
 pose_detector = None
 posture_analyzer = None
+voice_handler = None
 executor = ThreadPoolExecutor(max_workers=4)
 session_loggers = {}  # Track loggers per session
+session_pose_buffers = {}  # Track pose buffers per session
+session_feedback_managers = {}  # Track feedback managers per session
+session_context_builders = {}  # Track context builders per session
 
 
 def convert_to_serializable(obj):
@@ -205,7 +213,7 @@ async def process_frame(frame: np.ndarray, frame_count: int) -> Optional[Dict[st
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
-    global gemini_client, pose_detector, posture_analyzer, video_meet_manager
+    global gemini_client, pose_detector, posture_analyzer, video_meet_manager, voice_handler
     
     logger.info("=" * 60)
     logger.info("🚀 Starting AI Video Coach Backend with OpenPose")
@@ -230,6 +238,10 @@ async def lifespan(app: FastAPI):
     
     # Initialize video meet manager
     video_meet_manager = VideoMeetManager(base_url=MEET_BASE_URL)
+    
+    # Initialize voice handler (using Web Speech API by default)
+    logger.info("🎤 Initializing Voice Handler...")
+    voice_handler = VoiceHandler(use_google_cloud=False)
     
     logger.info("✅ All services initialized")
     logger.info(F"📡 Backend running on {MEET_BASE_URL}")
@@ -419,6 +431,16 @@ async def meet_websocket_endpoint(websocket: WebSocket, session_id: str):
     # Keep old coach for backward compatibility (optional)
     coach = CoachEngine(coaching_session, gemini_client)
     
+    # Initialize NEW architecture components
+    pose_buffer = CircularPoseBuffer(max_size=90)  # 3 seconds at 30 FPS
+    feedback_manager = FeedbackManager(voice_cooldown=5.0, visual_cooldown=1.0)
+    context_builder = ContextBuilder(max_conversation_history=3, max_error_history=10)
+    
+    # Store in session tracking
+    session_pose_buffers[participant_id] = pose_buffer
+    session_feedback_managers[participant_id] = feedback_manager
+    session_context_builders[participant_id] = context_builder
+    
     # Initialize session logger
     motion_logger = MotionLogger(log_dir="logs", filename_prefix=f"session_{session_id[:8]}")
     session_loggers[participant_id] = motion_logger
@@ -474,6 +496,66 @@ async def meet_websocket_endpoint(websocket: WebSocket, session_id: str):
                     })
                 continue
             
+            # ========================================
+            # VOICE MESSAGE HANDLING (New Architecture)
+            # ========================================
+            if msg_type == "voice":
+                transcript = message.get("transcript", "")
+                logger.info(f"🎤 Voice message received: {transcript}")
+                
+                try:
+                    # Get pose snapshot from buffer
+                    pose_snapshot = pose_buffer.get_snapshot(duration_seconds=1.0)
+                    
+                    # Get current asana info
+                    current_asana = yoga_coach.current_asana
+                    asana_name = current_asana.name if current_asana else "yoga pose"
+                    
+                    # Build context for Gemini
+                    context = context_builder.build_context(
+                        transcript=transcript,
+                        pose_snapshot=pose_snapshot,
+                        asana_definition=None  # Could add asana rules here
+                    )
+                    
+                    # Build prompt
+                    prompt = context_builder.build_prompt(context, asana_name)
+                    
+                    # Get Gemini response
+                    logger.debug("🤖 Requesting Gemini response for voice query...")
+                    ai_response = await gemini_client.send_coaching_request({
+                        "prompt": prompt,
+                        "context": context
+                    })
+                    
+                    # Record exchange in conversation history
+                    context_builder.add_exchange(transcript, ai_response)
+                    
+                    # Send response to frontend
+                    await websocket.send_json({
+                        "type": "voice_response",
+                        "transcript": transcript,
+                        "response": ai_response,
+                        "pose_snapshot": {
+                            "stability": pose_snapshot.get("stability", 0.0),
+                            "balance": pose_snapshot.get("balance_score", 0.0),
+                            "completion": pose_snapshot.get("completion_percentage", 0.0)
+                        }
+                    })
+                    
+                    logger.info(f"🤖 Voice response sent: {ai_response[:100]}...")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Error processing voice message: {e}", exc_info=True)
+                    await websocket.send_json({
+                        "type": "voice_response",
+                        "transcript": transcript,
+                        "response": "I'm having trouble processing that right now. Keep up the great work!",
+                        "error": str(e)
+                    })
+                
+                continue
+            
             if msg_type == "frame":
                 frame_base64 = message.get("frame")
                 if not frame_base64:
@@ -506,6 +588,11 @@ async def meet_websocket_endpoint(websocket: WebSocket, session_id: str):
                 # Update session
                 coaching_session.add_frame(frame_data)
                 coaching_session.update_metrics(frame_data)
+                
+                # ========================================
+                # UPDATE POSE BUFFER (New Architecture)
+                # ========================================
+                pose_buffer.push(frame_data)
                 
                 # Convert keypoints from dict to tuple format for logger
                 keypoints_for_logger = []
@@ -555,8 +642,9 @@ async def meet_websocket_endpoint(websocket: WebSocket, session_id: str):
                 gemini_response = None
                 coaching_data = None
                 
-                # Check every 2 frames for Gemini response (configurable)
-                if frame_count % 2 == 0:
+                # Check every 30 frames for Gemini response (~3 seconds at 10 FPS)
+                # This prevents blocking the real-time frame processing
+                if frame_count % 30 == 0:
                     logger.info(f"🤖 Requesting Gemini analysis for frame {frame_count}")
                     logger.debug(f"🔧 [MAIN] Preparing context for Gemini...")
                     
@@ -664,6 +752,14 @@ async def meet_websocket_endpoint(websocket: WebSocket, session_id: str):
             session_loggers[participant_id].close()
             del session_loggers[participant_id]
             logger.info(f"📝 Logger closed for {participant_id}")
+        
+        # Cleanup new architecture components
+        if participant_id in session_pose_buffers:
+            del session_pose_buffers[participant_id]
+        if participant_id in session_feedback_managers:
+            del session_feedback_managers[participant_id]
+        if participant_id in session_context_builders:
+            del session_context_builders[participant_id]
         
         video_meet_manager.remove_participant(session_id, participant_id)
         session_manager.remove_session(coaching_session_id)
