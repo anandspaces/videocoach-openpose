@@ -894,8 +894,8 @@ def main():
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
-        reload=True,
+        port=9005,
+        reload=False,
         log_level="info",
         ws_ping_interval=30,  # Send ping every 30 seconds
         ws_ping_timeout=60,   # Wait 60 seconds for pong (increased for long Gemini calls)
