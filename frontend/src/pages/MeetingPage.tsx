@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Camera, Heart, Zap, Volume2, Play, Pause, Wifi, WifiOff, Copy, Check, Video, Home, AlertCircle } from 'lucide-react';
+import { Camera, Heart, Zap, Volume2, Play, Pause, Wifi, WifiOff, Video, Home, AlertCircle } from 'lucide-react';
 import { BACKEND_URL, WS_BASE_URL, POSE_PAIRS } from '../config';
 import type { KeyPoint, AnalysisData, Stats, FeedbackItem, ConnectionStatus } from '../types';
+
 
 interface MeetingPageProps {
   sessionId: string;
@@ -22,11 +23,11 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
   });
   const [recentFeedback, setRecentFeedback] = useState<FeedbackItem[]>([]);
   const [lastAnalysis, setLastAnalysis] = useState<AnalysisData | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [meetingLink, setMeetingLink] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [geminiResponse, setGeminiResponse] = useState<string>('');
   const [coordinateLogs, setCoordinateLogs] = useState<string[]>([]);
+
+
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -47,7 +48,6 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
           return;
         }
         const data = await response.json();
-        setMeetingLink(`${window.location.origin}/meet/${sessionId}`);
         console.log('✅ Meeting verified:', data);
       } catch (err) {
         console.error('Error verifying meeting:', err);
@@ -414,13 +414,6 @@ const MeetingPage: React.FC<MeetingPageProps> = ({ sessionId, onNavigate }) => {
 
     // Voice confirmation
     speak('Session ended. Great work today!');
-  };
-
-  // Copy meeting link to clipboard
-  const copyMeetingLink = () => {
-    navigator.clipboard.writeText(meetingLink);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
   };
 
   // Get color for posture status
