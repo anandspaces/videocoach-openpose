@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-GEMINI_MODEL = "gemini-3-pro-preview"
+GEMINI_MODEL = "gemini-3-flash-preview"
 
 # Gemini 3 Pro uses "thoughts" tokens for reasoning, so we need more output tokens
 # Usage: ~285 prompt + ~997 thoughts + output = need at least 1500+ total
@@ -29,6 +29,9 @@ class GeminiClient:
         self.connected = False
         self.client = None
         self.api_key = os.getenv("GEMINI_API_KEY")
+        # Initialize asana detector
+        from src.services.asana_detector import AsanaDetector
+        self.asana_detector = AsanaDetector()
         
     async def connect(self):
         """Initialize Gemini AI client"""
@@ -118,7 +121,7 @@ class GeminiClient:
             return error_msg
     
     def _build_prompt(self, context: Dict[str, Any]) -> str:
-        """Build structured prompt for Gemini with actual movement data"""
+        """Build structured prompt for Gemini with actual movement data and asana detection"""
         logger.debug(f"[BUILD_PROMPT] Building prompt for frame {context.get('frame_num', 0)}")
         
         posture = context.get("posture", {})
@@ -138,6 +141,21 @@ class GeminiClient:
         logger.debug(f"  - Symmetry: {symmetry}")
         logger.debug(f"  - Joints count: {len(joints)}")
         logger.debug(f"  - Keypoints count: {len(keypoints)}")
+        
+        # ========================================
+        # ASANA DETECTION
+        # ========================================
+        detected_asana, asana_confidence = self.asana_detector.detect_asana(
+            keypoints=keypoints,
+            joints=joints,
+            balance=balance,
+            posture=posture
+        )
+        
+        asana_duration = self.asana_detector.get_pose_duration()
+        is_stable = self.asana_detector.check_pose_stability()
+        
+        logger.info(f"🧘 [BUILD_PROMPT] Asana Detection: {detected_asana or 'None'} (confidence: {asana_confidence:.2f}, duration: {asana_duration:.1f}s, stable: {is_stable})")
         
         # Build detailed movement context
         movement_energy = movement.get('energy', 'Unknown')
@@ -206,8 +224,58 @@ class GeminiClient:
         logger.debug(f"[BUILD_PROMPT] Positions string: {positions_str}")
         logger.debug(f"[BUILD_PROMPT] Joints string: {joints_str}")
         
-        # Comprehensive yoga coaching prompt - teaches proper form and alignment
-        prompt = f"""You are an expert yoga instructor analyzing a student's pose in real-time.
+        # ========================================
+        # BUILD ASANA-SPECIFIC OR GENERIC PROMPT
+        # ========================================
+        
+        if detected_asana and asana_confidence >= 0.6:
+            # HIGH CONFIDENCE: Build asana-specific prompt
+            asana_display_name = self.asana_detector.get_asana_display_name(detected_asana)
+            ideal_alignment = self.asana_detector.get_ideal_alignment_text(detected_asana)
+            common_mistakes = self.asana_detector.get_common_mistakes_text(detected_asana)
+            
+            prompt = f"""You are an expert yoga instructor analyzing a student performing {asana_display_name}.
+
+DETECTED ASANA: {asana_display_name}
+- Held for: {asana_duration:.1f} seconds
+- Detection confidence: {asana_confidence*100:.0f}%
+- Pose stability: {'Stable' if is_stable else 'Unstable'}
+
+IDEAL ALIGNMENT FOR {asana_display_name.upper()}:
+{ideal_alignment}
+
+CURRENT STUDENT POSITION:
+- Body Keypoints: {positions_str}
+- Joint Angles: {joints_str}
+- Balance Score: {balance_score:.0f}/100
+- Arm Symmetry: {arm_symmetry:.0f}%
+- Leg Symmetry: {leg_symmetry:.0f}%
+
+COMMON MISTAKES FOR {asana_display_name.upper()}:
+{common_mistakes}
+
+YOUR TASK:
+Compare the student's current position to the ideal {asana_display_name} alignment above.
+Identify the MOST IMPORTANT correction needed right now.
+
+Provide ONE specific, actionable instruction (15-20 words) that:
+1. Addresses the biggest alignment issue for THIS SPECIFIC ASANA
+2. Uses specific body part names (e.g., "left knee", "right hip", "shoulders")
+3. Explains the correction clearly
+4. Is encouraging and supportive
+
+EXAMPLES FOR {asana_display_name.upper()}:
+- "Press your raised foot higher on your inner thigh, not on the knee joint, for safer Tree Pose."
+- "Straighten your standing leg completely and engage your thigh muscles for better balance."
+- "Square your hips forward by drawing your raised leg's hip back slightly."
+
+Your coaching instruction:"""
+            
+            logger.info(f"📝 [BUILD_PROMPT] Built ASANA-SPECIFIC prompt for {asana_display_name}")
+        
+        else:
+            # LOW CONFIDENCE: Use generic yoga coaching prompt
+            prompt = f"""You are an expert yoga instructor analyzing a student's pose in real-time.
 
 CURRENT FRAME DATA (Frame {frame_num}):
 - Body Keypoints: {positions_str}
@@ -221,7 +289,7 @@ Analyze the student's current body position and provide ONE specific, actionable
 
 FOCUS ON:
 1. **Alignment**: Check if joints are properly aligned (shoulders over hips, knees over ankles, etc.)
-2. **Form**: Identify if the pose resembles a yoga asana (Mountain Pose, Warrior, Tree Pose, Downward Dog, etc.)
+2. **Form**: Try to identify which yoga asana this might be (Mountain, Warrior, Tree, Downward Dog, etc.)
 3. **Balance**: If balance is low, suggest grounding techniques or adjustments
 4. **Breathing**: Remind about breath coordination with movement
 5. **Safety**: Warn about potential strain or misalignment that could cause injury
@@ -230,7 +298,7 @@ INSTRUCTION FORMAT:
 Provide a clear, encouraging instruction in 15-20 words that includes:
 - What to adjust (e.g., "lift chest", "bend knees", "engage core")
 - Why it matters (e.g., "for better alignment", "to protect lower back")
-- Optional: Name the pose if recognizable
+- Optional: Name the pose if you can identify it
 
 EXAMPLES:
 - "Engage your core and lift through the crown of your head for proper Mountain Pose alignment."
@@ -239,6 +307,8 @@ EXAMPLES:
 - "Align your hips over ankles and lengthen your spine for a strong Warrior stance."
 
 Your coaching instruction:"""
+            
+            logger.info(f"📝 [BUILD_PROMPT] Built GENERIC prompt (low asana confidence: {asana_confidence:.2f})")
         
         logger.debug(f"[BUILD_PROMPT] Complete prompt:\n{prompt}")
         logger.info(f"📝 [BUILD_PROMPT] Yoga coaching prompt built with {len(key_positions)} keypoints and {len(joint_info)} joints")
@@ -294,7 +364,7 @@ Your coaching instruction:"""
                     logger.debug(f"  - First candidate attrs: {dir(response.candidates[0])}")
             
             # Extract text from response
-            # Note: response.text works on gemini-3-pro-preview once tokens are sufficient
+            # Note: response.text works on gemini-3-flash-preview once tokens are sufficient
             coaching_text = None
             extraction_method = None
             
