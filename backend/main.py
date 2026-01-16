@@ -221,8 +221,8 @@ async def lifespan(app: FastAPI):
     
     # Initialize pose detector
     logger.info("🎥 Initializing OpenPose detector...")
-    model_file = "src/openpose/models/pose/coco/pose_iter_440000.caffemodel"
-    config_file = "src/openpose/models/pose/coco/pose_deploy_linevec.prototxt"
+    model_file = "openpose/models/pose/coco/pose_iter_440000.caffemodel"
+    config_file = "openpose/models/pose/coco/pose_deploy_linevec.prototxt"
     
     if not os.path.exists(model_file):
         logger.error(f"Model not found at {model_file}")

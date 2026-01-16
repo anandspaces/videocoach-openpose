@@ -25,8 +25,8 @@ def main():
     logger.log("=" * 60)
     
     # Load pose detector
-    model_file = "src/openpose/models/pose/coco/pose_iter_440000.caffemodel"
-    config_file = "src/openpose/models/pose/coco/pose_deploy_linevec.prototxt"
+    model_file = "openpose/models/pose/coco/pose_iter_440000.caffemodel"
+    config_file = "openpose/models/pose/coco/pose_deploy_linevec.prototxt"
     
     if not os.path.exists(model_file):
         logger.log(f"Error: Model not found at {model_file}")
